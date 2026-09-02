@@ -131,9 +131,41 @@ struct DSDContainerParserTests {
         for word in [UInt32(0x0005_6969), UInt32(0x00FA_6969)] {
             let packed = DoPFrameEncoder.pack(word, for: format)
             let sample = DoPFrameEncoder.float32Sample(forPackedPhysicalWord: packed)
-            let reconstructed = UInt32(bitPattern: Int32(sample * 2_147_483_648))
+            let reconstructed = DoPFrameEncoder.packedPhysicalWord(forFloat32Sample: sample)
             #expect(reconstructed == packed)
         }
+    }
+
+    @Test func doPOutputTimelineKeepsMarkersContinuousAcrossOddUnderrun() {
+        let format = physicalFormat(rate: 176_400, bits: 32)
+        var timeline = DoPOutputTimeline(format: format, channelCount: 2)
+        var first = floatSamples(words: [
+            0x0005_1122, 0x0005_3344,
+            0x00FA_5566, 0x00FA_7788,
+            0, 0
+        ], format: format)
+        first.withUnsafeMutableBufferPointer {
+            timeline.render(interleavedSamples: $0.baseAddress!, sourceFrameCount: 2, totalFrameCount: 3)
+        }
+        #expect(physicalWords(first) == [
+            0x0511_2200, 0x0533_4400,
+            0xFA55_6600, 0xFA77_8800,
+            0x0569_6900, 0x0569_6900
+        ])
+
+        // producer 不知道 HAL 已补过一个奇数帧，仍送来从 0x05 开始的旧相位数据。
+        var resumed = floatSamples(words: [
+            0x0005_99AA, 0x0005_BBCC,
+            0x00FA_DDEE, 0x00FA_F012
+        ], format: format)
+        resumed.withUnsafeMutableBufferPointer {
+            timeline.render(interleavedSamples: $0.baseAddress!, sourceFrameCount: 2, totalFrameCount: 2)
+        }
+        #expect(physicalWords(resumed) == [
+            0xFA99_AA00, 0xFABB_CC00,
+            0x05DD_EE00, 0x05F0_1200
+        ])
+        #expect(timeline.renderedFrameCount == 5)
     }
 
     @Test func dsfStreamReadsChannelBlocksNormalizesBitsAndSeeks() throws {
@@ -302,6 +334,16 @@ struct DSDContainerParserTests {
             isAlignedHigh: isAlignedHigh,
             isNonMixable: true
         )
+    }
+
+    private func floatSamples(words: [UInt32], format: HiFiAudioPhysicalFormat) -> [Float32] {
+        words.map {
+            DoPFrameEncoder.float32Sample(forPackedPhysicalWord: DoPFrameEncoder.pack($0, for: format))
+        }
+    }
+
+    private func physicalWords(_ samples: [Float32]) -> [UInt32] {
+        samples.map(DoPFrameEncoder.packedPhysicalWord(forFloat32Sample:))
     }
 
     private func littleEndianChunk(_ identifier: String, payload: Data) -> Data {

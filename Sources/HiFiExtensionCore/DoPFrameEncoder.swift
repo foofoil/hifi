@@ -52,4 +52,9 @@ public struct DoPFrameEncoder: Sendable {
     public static func float32Sample(forPackedPhysicalWord word: UInt32) -> Float32 {
         Float32(Int32(bitPattern: word)) / 2_147_483_648
     }
+
+    /// 还原由 ``float32Sample(forPackedPhysicalWord:)`` 生成的无损 24-bit physical word。
+    public static func packedPhysicalWord(forFloat32Sample sample: Float32) -> UInt32 {
+        UInt32(bitPattern: Int32(sample * 2_147_483_648))
+    }
 }

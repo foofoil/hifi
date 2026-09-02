@@ -39,6 +39,12 @@ private let createSessionCallback: RuntimeCall = { _, input, inputLength, output
     }
     do {
         let descriptor = try DSDContainerParser.parse(fileAt: url)
+        guard descriptor.kind == .dsf,
+              descriptor.compression == .rawDSD,
+              descriptor.channelCount == 2,
+              descriptor.sampleCount != nil else {
+            return RuntimeStatus.unsupportedRequest
+        }
         let devices = try CoreAudioDeviceCatalog.outputDevices()
         let sessionID = UUID()
         try runtimeController.registerSession(
@@ -190,7 +196,12 @@ private func makeSession(
     let capability: (String, String) -> [String: Any] = { id, scope in
         ["declaration": ["id": id, "contractVersion": 1, "scope": scope, "dependencies": []], "state": "active"]
     }
-    var playback: [String: Any] = ["state": "idle", "position": 0, "isSeekable": duration != nil]
+    var playback: [String: Any] = [
+        "state": "idle",
+        "position": 0,
+        "isSeekable": duration != nil,
+        "underrunCount": 0
+    ]
     if let duration { playback["duration"] = duration }
     var selection: [String: Any] = [
         "contractVersion": 1,
@@ -278,6 +289,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                     startingSample: record.samplePosition
                 )
                 record.playbackState = "playing"
+                record.underrunCount = 0
                 record.failureDescription = nil
                 lock.lock()
                 playingSessionID = id
@@ -292,11 +304,48 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         case "hifi.pause":
             let status = try player.stop()
             record.samplePosition = status.samplePosition
+            record.underrunCount = status.underrunCount
             record.playbackState = "paused"
             record.failureDescription = status.failureDescription
             lock.lock()
             if playingSessionID == id { playingSessionID = nil }
             lock.unlock()
+        case "hifi.seek":
+            guard let playback = session["mediaPlayback"] as? [String: Any],
+                  let requestedPosition = (playback["position"] as? NSNumber)?.doubleValue,
+                  requestedPosition.isFinite, requestedPosition >= 0 else {
+                throw RuntimeControllerError.invalidPlaybackPosition
+            }
+            let requestedSample = min(
+                UInt64(min(requestedPosition * Double(record.sampleRate), Double(record.sampleCount))),
+                record.sampleCount
+            )
+            let targetSample = requestedSample - requestedSample % 16
+            lock.lock()
+            let wasPlaying = playingSessionID == id
+            if wasPlaying { playingSessionID = nil }
+            lock.unlock()
+            record.samplePosition = targetSample
+            record.underrunCount = 0
+            if wasPlaying {
+                do {
+                    _ = try player.stop()
+                    guard let deviceUID = record.selectedDeviceID else {
+                        throw RuntimeControllerError.noOutputDevice
+                    }
+                    try player.play(fileAt: record.url, deviceUID: deviceUID, startingSample: targetSample)
+                    record.playbackState = "playing"
+                    record.failureDescription = nil
+                    lock.lock()
+                    playingSessionID = id
+                    lock.unlock()
+                } catch {
+                    record.playbackState = "failed"
+                    record.failureDescription = String(describing: error)
+                }
+            } else if record.playbackState == "idle" || record.playbackState == "stopped" {
+                record.playbackState = "paused"
+            }
         case "hifi.close":
             close(record)
         default:
@@ -336,6 +385,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         if wasPlaying {
             let status = try player.stop()
             record.samplePosition = status.samplePosition
+            record.underrunCount = status.underrunCount
             record.playbackState = "paused"
             record.failureDescription = status.failureDescription
             lock.lock()
@@ -364,6 +414,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         guard let trackedRecord else { return }
         let status = try player.stop()
         trackedRecord.samplePosition = status.samplePosition
+        trackedRecord.underrunCount = status.underrunCount
         trackedRecord.playbackState = "paused"
         trackedRecord.failureDescription = status.failureDescription
     }
@@ -383,7 +434,10 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         let status = player.status()
         lock.lock()
         let wasTracked = playingSessionID == record.id
-        if wasTracked { record.samplePosition = status.samplePosition }
+        if wasTracked {
+            record.samplePosition = status.samplePosition
+            record.underrunCount = status.underrunCount
+        }
         if wasTracked, status.state != .playing {
             playingSessionID = nil
             record.playbackState = status.state == .failed ? "failed" : "stopped"
@@ -395,6 +449,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         if var playback = session["mediaPlayback"] as? [String: Any] {
             playback["state"] = record.playbackState
             playback["position"] = position
+            playback["underrunCount"] = record.underrunCount
             playback["failureMessage"] = record.failureDescription
             session["mediaPlayback"] = playback
         }
@@ -428,6 +483,7 @@ private final class RuntimeSession {
     let sampleCount: UInt64
     var selectedDeviceID: String?
     var samplePosition: UInt64 = 0
+    var underrunCount: UInt64 = 0
     var playbackState = "idle"
     var failureDescription: String?
 
@@ -475,4 +531,5 @@ private final class RuntimeResourceAccess {
 private enum RuntimeControllerError: Error {
     case invalidSession
     case noOutputDevice
+    case invalidPlaybackPosition
 }

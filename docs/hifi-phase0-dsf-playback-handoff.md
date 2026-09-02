@@ -26,16 +26,17 @@ DSF 文件
 - 声道：Stereo；
 - 已实测采样率：DSD64 / 2.8224 MHz；
 - 输出：DoP，经 CoreAudio HAL 独占 USB DAC；
-- 宿主能力：打开文件、播放、暂停、进度轮询、结束后从头重播、输出设备选择；
+- 宿主能力：打开文件、播放、暂停、进度轮询、拖动 Seek、结束后从头重播、输出设备选择；
 - 生命周期：暂停、切换设备、关闭/替换箔片时停止 IO、恢复设备格式并释放 Hog Mode；
 - 安全范围：插件会话存活期间持有文件 bookmark 对应的 security-scoped access。
+- 稳定性：HAL 输出时间线会统一重写 DoP marker；即使发生奇数帧 underrun，静音后的音频也不会沿用 producer 的旧 marker 相位；
+- 诊断：Runtime 的 `mediaPlayback.underrunCount` 会随状态轮询返回当前播放尝试的 underrun 次数。
 
 尚未完成的能力不能被误认为已实现：
 
 - DSD → PCM fallback；
 - raw DFF 或 DST DFF 的实际播放；
 - DSD128 / DSD256 的真实硬件回归；
-- Seek UI/命令（底层 source 和 engine 已能从对齐 sample 启动）；
 - 多文件播放队列与现有列表/Navigator 的闭环；
 - SACD ISO；
 - metadata、封面和正式 Session 恢复；
@@ -93,24 +94,25 @@ DoP silence 使用 payload `0x69, 0x69`，marker 仍须连续交替。任何 und
 
 ## 4. 代码地图
 
-### Hi-Fi Swift Package
+### Hi-Fi 独立仓库
 
-- `HiFiExtension/Package.swift`：Core、动态 Runtime、三个诊断 CLI 和测试目标。
-- `HiFiExtension/ExtensionManifest.json`：Hi-Fi provider/capability 声明。
-- `HiFiExtension/build-plugin`：构建 `.foofoilextension` bundle 并签名。
-- `HiFiExtension/Sources/HiFiExtensionCore/DSDContainerParser.swift`：DSF/DFF descriptor parser。
-- `HiFiExtension/Sources/HiFiExtensionCore/DSFRawStream.swift`：DSF channel-block 流读取、位序归一化、sample seek。
-- `HiFiExtension/Sources/HiFiExtensionCore/DoPFrameEncoder.swift`：DoP marker、payload 时序、physical word 与 Float32 映射。
-- `HiFiExtension/Sources/HiFiExtensionCore/DSFDoPSource.swift`：DSFRawStream 到 interleaved Float32 DoP frame。
-- `HiFiExtension/Sources/HiFiExtensionCore/SPSCFloatRingBuffer.swift`：实时线程使用的固定容量单生产者/单消费者 ring。
-- `HiFiExtension/Sources/HiFiExtensionCore/CoreAudioDeviceCatalog.swift`：输出设备及 physical format 枚举。
-- `HiFiExtension/Sources/HiFiExtensionCore/CoreAudioHALFormatProbe.swift`：DoP transport 规划、格式切换、Hog Mode 和诊断 silence。
-- `HiFiExtension/Sources/HiFiExtensionCore/HALDSFPlaybackEngine.swift`：文件 worker、预缓冲、HAL IOProc、停止与恢复。
-- `HiFiExtension/Sources/HiFiExtensionRuntime/Runtime.swift`：C ABI Runtime、播放会话仲裁、命令和设备菜单状态。
-- `HiFiExtension/Sources/HiFiInspect/main.swift`：文件/设备/stream-check 诊断。
-- `HiFiExtension/Sources/HiFiHALProbe/main.swift`：HAL dry-run、格式 apply/restore、DoP silence 验证。
-- `HiFiExtension/Sources/HiFiRuntimeSmoke/main.swift`：Runtime ABI 与 Session JSON 冒烟测试。
-- `HiFiExtension/Tests/HiFiExtensionCoreTests/DSDContainerParserTests.swift`：当前 15 项核心测试。
+- `Package.swift`：Core、动态 Runtime、三个诊断 CLI 和测试目标。
+- `ExtensionManifest.json`：Hi-Fi provider/capability 声明。
+- `build-plugin`：构建 `.foofoilextension` bundle 并签名。
+- `Sources/HiFiExtensionCore/DSDContainerParser.swift`：DSF/DFF descriptor parser。
+- `Sources/HiFiExtensionCore/DSFRawStream.swift`：DSF channel-block 流读取、位序归一化、sample seek。
+- `Sources/HiFiExtensionCore/DoPFrameEncoder.swift`：DoP marker、payload 时序、physical word 与 Float32 映射。
+- `Sources/HiFiExtensionCore/DoPOutputTimeline.swift`：按 HAL 时间线统一 marker 并补 DoP silence。
+- `Sources/HiFiExtensionCore/DSFDoPSource.swift`：DSFRawStream 到 interleaved Float32 DoP frame。
+- `Sources/HiFiExtensionCore/SPSCFloatRingBuffer.swift`：实时线程使用的固定容量单生产者/单消费者 ring。
+- `Sources/HiFiExtensionCore/CoreAudioDeviceCatalog.swift`：输出设备及 physical format 枚举。
+- `Sources/HiFiExtensionCore/CoreAudioHALFormatProbe.swift`：DoP transport 规划、格式切换、Hog Mode 和诊断 silence。
+- `Sources/HiFiExtensionCore/HALDSFPlaybackEngine.swift`：文件 worker、预缓冲、HAL IOProc、停止与恢复。
+- `Sources/HiFiExtensionRuntime/Runtime.swift`：C ABI Runtime、播放会话仲裁、命令和设备菜单状态。
+- `Sources/HiFiInspect/main.swift`：文件/设备/stream-check 诊断。
+- `Sources/HiFiHALProbe/main.swift`：HAL dry-run、格式 apply/restore、DoP silence 验证。
+- `Sources/HiFiRuntimeSmoke/main.swift`：Runtime ABI 与 Session JSON 冒烟测试。
+- `Tests/HiFiExtensionCoreTests/DSDContainerParserTests.swift`：当前 16 项核心测试。
 
 ### foofoil 宿主改动
 
@@ -145,7 +147,6 @@ HAL callback 中禁止文件 I/O、锁、内存分配、JSON、日志或 Swift c
 SWIFTPM_MODULECACHE_OVERRIDE=/tmp/foofoil-hifi-swiftpm-cache \
 CLANG_MODULE_CACHE_PATH=/tmp/foofoil-hifi-clang-cache \
 swift test \
-  --package-path HiFiExtension \
   --disable-sandbox \
   --scratch-path /tmp/foofoil-hifi-build
 ```
@@ -163,14 +164,14 @@ xcodebuild test \
 构建、注入插件并启动应用：
 
 ```sh
-./run
+cd ../foofoil && ./run
 ```
 
 检查真实 DSF 与设备：
 
 ```sh
-swift run --package-path HiFiExtension hifi-inspect --devices
-swift run --package-path HiFiExtension hifi-inspect --stream-check '/path/to/file.dsf'
+swift run hifi-inspect --devices
+swift run hifi-inspect --stream-check '/path/to/file.dsf'
 ```
 
 注意：shell 中不要在单引号包围的文件路径内换行；换行会成为真实路径字符并导致 `NSCocoaErrorDomain Code=260`。
@@ -179,14 +180,11 @@ swift run --package-path HiFiExtension hifi-inspect --stream-check '/path/to/fil
 
 ## 7. 已知欠账与风险
 
-### 7.1 Manifest 暂时超前于 Runtime
+### 7.1 Manifest 已暂时收紧到 Runtime 实际范围
 
-`ExtensionManifest.json` 当前声明了 `dsf`、`dff`、`iso`、`public.audio` 以及 queue/navigator/seekable 等能力，但 Runtime 目前只有 DSF DoP 播放闭环。下一位 agent 应尽早选择一种方式：
+`ExtensionManifest.json` 当前只声明 `dsf`、设备选择和命令能力；Runtime 也会拒绝非 Stereo raw DSF 请求。DFF、ISO、普通音频增强、queue/navigator/seekable 要在对应闭环实现后再逐项恢复声明。
 
-- 暂时收紧 manifest，只公开确实可用的范围；或
-- 按 Phase 1 顺序补齐 DFF、queue/navigator、seek 和 fallback。
-
-不能让 DFF/ISO 被选中后只在播放时才暴露 `unsupportedSource`，也不能长期报告 `isSeekable = true` 却没有 seek 命令。
+不要提前恢复 capability：不能让 DFF/ISO 被选中后只在播放时才暴露 `unsupportedSource`，也不能报告 `isSeekable = true` 却没有带位置参数的 seek 命令。
 
 ### 7.2 列表尚未真正接通
 
@@ -196,13 +194,11 @@ swift run --package-path HiFiExtension hifi-inspect --stream-check '/path/to/fil
 
 ### 7.3 Underrun 与 marker continuity
 
-当前有较大预缓冲，实测播放正常，但 underrun 路径仍需专项压力测试。音频 payload 和 silence 的 marker phase 必须共享同一输出时间线；若 ring starvation 后 source encoder 的 phase 与 HAL timeline 相反，DAC 可能短暂丢锁或产生爆音。
+当前有较大预缓冲，实测播放正常。音频 payload 和 silence 现已共享 HAL 输出时间线：callback 会保留 payload 并重写 marker，因此 ring starvation 后 source encoder 的旧相位不会造成重复 marker。已有确定性测试覆盖奇数帧 underrun 后恢复旧相位音频。
 
-建议增加：
+仍建议增加：
 
 - 可注入慢 producer 的确定性测试；
-- marker phase 连续性断言；
-- runtime status 中的 underrunCount 诊断展示或日志；
 - 设备断开、格式被外部应用改变、Hog Mode 被抢占的恢复测试。
 
 ### 7.4 错误与恢复仍较粗糙
@@ -218,13 +214,12 @@ DoP 链路不能应用软件音量。当前没有为 Hi-Fi 单独显示 Fixed Vo
 建议先把“一个 DSF 正常播放”的结果加固，再扩大格式范围：
 
 1. **播放稳定性**：共享 marker timeline、underrun 诊断、设备断开/占用错误、长时间播放和暂停恢复。
-2. **真实 Seek**：增加 Runtime seek command，使 UI 进度条可操作；seek 对齐到 16 DSD sample，并重置 DoP phase。
-3. **现有列表接入**：多个 DSF/DFF 形成 `PlaybackQueueSnapshot` 和 `NavigatorContribution`；实现上一项、下一项、选择项和当前项同步。
-4. **raw DFF 播放**：实现 DFF source 并复用现有 `DSDStream → DoP → HAL` 管线。
-5. **PCM fallback**：内置扬声器、蓝牙和不支持目标 carrier 的设备必须可播放；再实现 Automatic / Prefer DoP / Always PCM 策略。
-6. **metadata、封面、设置与 Session 恢复**。
-7. **DST 与 SACD ISO**：按主技术方案接入同一 queue/navigator，不生成临时 DSF。
-8. **服务隔离和发布**：评估将 application-scope audio service 移至独立 Engine Service/XPC，并完成正式插件安装、升级与签名流程。
+2. **现有列表接入**：多个 DSF/DFF 形成 `PlaybackQueueSnapshot` 和 `NavigatorContribution`；实现上一项、下一项、选择项和当前项同步。
+3. **raw DFF 播放**：实现 DFF source 并复用现有 `DSDStream → DoP → HAL` 管线。
+4. **PCM fallback**：内置扬声器、蓝牙和不支持目标 carrier 的设备必须可播放；再实现 Automatic / Prefer DoP / Always PCM 策略。
+5. **metadata、封面、设置与 Session 恢复**。
+6. **DST 与 SACD ISO**：按主技术方案接入同一 queue/navigator，不生成临时 DSF。
+7. **服务隔离和发布**：评估将 application-scope audio service 移至独立 Engine Service/XPC，并完成正式插件安装、升级与签名流程。
 
 Phase 1 的真正验收不是“parser 能读 DFF”，而是：DSF/DFF 能从 Finder、拖放和批量列表进入同一宿主体验；DoP 不可用时自动 PCM；Seek、切歌、设备切换和恢复均不破坏音频设备状态。
 
@@ -232,18 +227,17 @@ Phase 1 的真正验收不是“parser 能读 DFF”，而是：DSF/DFF 能从 F
 
 新 agent 开始工作时：
 
-1. 读取仓库根目录 `AGENTS.md`、本文和 `foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md`。
+1. 在独立 `hifi` 仓库读取根目录 `AGENTS.md`、本文和 `foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md`。
 2. 执行 `git status --short`；当前工作可能尚未提交，必须保留用户已有修改，不得 reset。
-3. 运行 15 项 Hi-Fi 核心测试和相关 ExtensionKit 测试，建立基线。
+3. 运行 16 项 Hi-Fi 核心测试和相关 ExtensionKit 测试，建立基线。
 4. 不要重新猜测 176.4 kHz 的来源，也不要重做已经通过的 DoP silence/Hog Mode spike。
 5. 修改 DoP encoder、DSF bit order、physical/virtual format 或 callback layout 前，先阅读本文第 2、3、5 节并补回归测试。
 6. 完成 app 代码变更后按仓库要求执行 `./run`，让用户直接进行硬件验收。
 
 ## 10. 关联文档
 
-- 总体技术方案：`foofoil/docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md`
-- 扩展系统方案：`foofoil/docs/foofoil_Extension_System_Implementation_Plan.md`
-- 扩展部署记录：`foofoil/docs/phase0-extensionkit-deployment.md`
+- 总体技术方案：`docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md`
+- 扩展系统方案：相邻 foofoil 仓库的 `foofoil/docs/foofoil_Extension_System_Implementation_Plan.md`
+- 扩展部署记录：相邻 foofoil 仓库的 `foofoil/docs/phase0-extensionkit-deployment.md`
 - DoP open Standard 1.1：<https://dsd-guide.com/sites/default/files/white-papers/DoP_openStandard_1v1.pdf>
 - Sony DSF File Format Specification 1.01：<https://dsd-guide.com/sites/default/files/white-papers/DSFFileFormatSpec_E.pdf>
-

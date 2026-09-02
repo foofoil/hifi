@@ -254,19 +254,14 @@ private final class PlaybackSession: @unchecked Sendable {
     private let underrunCount = Atomic<UInt64>(0)
     private let ioStopped = Atomic<Bool>(false)
     private var ioProcID: AudioDeviceIOProcID?
-    private var renderedTimelineFrames: UInt64 = 0
-    private let silence05: Float32
-    private let silenceFA: Float32
+    private var outputTimeline: DoPOutputTimeline
 
     init(configuredDevice: ConfiguredDevice, source: DSFDoPSource, startingSample: UInt64) {
         self.configuredDevice = configuredDevice
         self.source = source
         self.startingSample = startingSample
         let format = CoreAudioHALFormatProbe.describe(configuredDevice.physicalFormat)
-        let packed05 = DoPFrameEncoder.pack(0x0005_6969, for: format)
-        let packedFA = DoPFrameEncoder.pack(0x00FA_6969, for: format)
-        silence05 = DoPFrameEncoder.float32Sample(forPackedPhysicalWord: packed05)
-        silenceFA = DoPFrameEncoder.float32Sample(forPackedPhysicalWord: packedFA)
+        outputTimeline = DoPOutputTimeline(format: format, channelCount: 2)
     }
 
     func prefill() throws {
@@ -385,14 +380,12 @@ private final class PlaybackSession: @unchecked Sendable {
         consumedFrames.wrappingAdd(UInt64(readFrames), ordering: .relaxed)
         if readFrames < frameCount {
             underrunCount.wrappingAdd(1, ordering: .relaxed)
-            for frame in readFrames..<frameCount {
-                let value = (renderedTimelineFrames + UInt64(frame)).isMultiple(of: 2)
-                    ? silence05
-                    : silenceFA
-                output[frame * 2] = value
-                output[frame * 2 + 1] = value
-            }
         }
-        renderedTimelineFrames += UInt64(frameCount)
+        // ring 内 marker 属于 producer 时间线；发生 underrun 后必须按 HAL 时间线重写相位。
+        outputTimeline.render(
+            interleavedSamples: output,
+            sourceFrameCount: readFrames,
+            totalFrameCount: frameCount
+        )
     }
 }
