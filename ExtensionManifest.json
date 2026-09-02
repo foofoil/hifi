@@ -23,7 +23,9 @@
   ],
   "capabilities": [
     {"id": "session.seekable", "contractVersion": 1, "scope": "session"},
+    {"id": "media.playback-queue", "contractVersion": 1, "scope": "session"},
     {"id": "audio.device-selection", "contractVersion": 1, "scope": "application"},
-    {"id": "ui.commands", "contractVersion": 1, "scope": "presentation"}
+    {"id": "ui.commands", "contractVersion": 1, "scope": "presentation"},
+    {"id": "ui.navigator", "contractVersion": 1, "scope": "presentation"}
   ]
 }

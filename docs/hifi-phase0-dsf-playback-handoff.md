@@ -26,7 +26,7 @@ DSF 文件
 - 声道：Stereo；
 - 已实测采样率：DSD64 / 2.8224 MHz；
 - 输出：DoP，经 CoreAudio HAL 独占 USB DAC；
-- 宿主能力：打开文件、播放、暂停、进度轮询、拖动 Seek、结束后从头重播、输出设备选择；
+- 宿主能力：打开文件、播放、暂停、进度轮询、拖动 Seek、结束后从头重播、输出设备选择；多个 DSF 可形成队列，通过 Navigator、上一项/下一项切换并自动续播；
 - 生命周期：暂停、切换设备、关闭/替换箔片时停止 IO、恢复设备格式并释放 Hog Mode；
 - 安全范围：插件会话存活期间持有文件 bookmark 对应的 security-scoped access。
 - 稳定性：HAL 输出时间线会统一重写 DoP marker；即使发生奇数帧 underrun，静音后的音频也不会沿用 producer 的旧 marker 相位；
@@ -37,7 +37,7 @@ DSF 文件
 - DSD → PCM fallback；
 - raw DFF 或 DST DFF 的实际播放；
 - DSD128 / DSD256 的真实硬件回归；
-- 多文件播放队列与现有列表/Navigator 的闭环；
+- 队列 remove/move、追加文件及循环/随机模式；
 - SACD ISO；
 - metadata、封面和正式 Session 恢复；
 - Release 插件安装/升级体验；
@@ -182,13 +182,13 @@ swift run hifi-inspect --stream-check '/path/to/file.dsf'
 
 ### 7.1 Manifest 已暂时收紧到 Runtime 实际范围
 
-`ExtensionManifest.json` 当前只声明 `dsf`、设备选择和命令能力；Runtime 也会拒绝非 Stereo raw DSF 请求。DFF、ISO、普通音频增强、queue/navigator/seekable 要在对应闭环实现后再逐项恢复声明。
+`ExtensionManifest.json` 当前只匹配 `dsf`，并声明已经接通的 seek、queue/navigator、设备选择和命令能力；Runtime 也会拒绝非 Stereo raw DSF 请求。DFF、ISO 与普通音频增强要在对应闭环实现后再逐项恢复声明。
 
 不要提前恢复 capability：不能让 DFF/ISO 被选中后只在播放时才暴露 `unsupportedSource`，也不能报告 `isSeekable = true` 却没有带位置参数的 seek 命令。
 
-### 7.2 列表尚未真正接通
+### 7.2 列表基础闭环已接通
 
-单个 DSF 会通过强扩展名匹配进入 Hi-Fi，但 DSF 还没有映射成 foofoil 现有音频列表的 item/queue contribution。批量打开、同目录加入列表、上一项/下一项和 Navigator 选择尚未闭环。
+多个 DSF 已可通过 `fileCollection` 建立 `PlaybackQueueSnapshot` 与 `NavigatorContribution`，支持上一项、下一项、Navigator activate 和播完续播。当前仍缺 remove/move、向既有会话追加文件、循环/随机模式与正式恢复。
 
 实现时应使用现有 `PlaybackQueueSnapshot` 与 `NavigatorContribution`，不要在插件中自绘列表，也不要把 SACD Track 伪装成临时外部文件。
 

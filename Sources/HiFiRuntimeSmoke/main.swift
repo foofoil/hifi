@@ -33,10 +33,10 @@ defer { if isSelfTest { try? FileManager.default.removeItem(at: selfTestURL) } }
 let url = isSelfTest
     ? selfTestURL
     : URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
-let request: [String: Any] = [
-    "kind": "singleFile",
-    "resource": ["url": url.absoluteString]
-]
+let resource: [String: Any] = ["url": url.absoluteString]
+let request: [String: Any] = isSelfTest
+    ? ["kind": "fileCollection", "resources": [resource, resource]]
+    : ["kind": "singleFile", "resource": resource]
 
 do {
     guard let rawInterface = createRuntime(1) else { throw SmokeError.runtimeUnavailable }
@@ -64,10 +64,36 @@ do {
     let sessionData = Data(bytes: response, count: responseLength)
     guard let session = try JSONSerialization.jsonObject(with: sessionData) as? [String: Any],
           session["providerID"] as? String == "audio.hifi",
-          session["audioDeviceSelection"] is [String: Any] else {
+          session["audioDeviceSelection"] is [String: Any],
+          !isSelfTest || ((session["playbackQueue"] as? [String: Any])?["items"] as? [[String: Any]])?.count == 2 else {
         throw SmokeError.invalidSession
     }
-    let pretty = try JSONSerialization.data(withJSONObject: session, options: [.prettyPrinted, .sortedKeys])
+    var finalSession = session
+    if isSelfTest, let performCommand = interface.pointee.performCommand {
+        var requested = session
+        var contributions = requested["navigatorContributions"] as! [[String: Any]]
+        contributions[0]["selectedItemIDs"] = ["file:1"]
+        requested["navigatorContributions"] = contributions
+        let message = try JSONSerialization.data(withJSONObject: [
+            "commandID": "hifi.navigator.activate",
+            "session": requested
+        ])
+        var commandResponse: UnsafeMutablePointer<UInt8>?
+        var commandResponseLength = 0
+        let commandStatus = message.withUnsafeBytes { bytes in
+            performCommand(interface.pointee.context, bytes.bindMemory(to: UInt8.self).baseAddress,
+                bytes.count, &commandResponse, &commandResponseLength)
+        }
+        guard commandStatus == 0, let commandResponse else { throw SmokeError.callFailed(commandStatus) }
+        defer { releaseBytes(interface.pointee.context, commandResponse, commandResponseLength) }
+        finalSession = try JSONSerialization.jsonObject(
+            with: Data(bytes: commandResponse, count: commandResponseLength)
+        ) as! [String: Any]
+        guard (finalSession["playbackQueue"] as? [String: Any])?["currentItemID"] as? String == "file:1" else {
+            throw SmokeError.invalidSession
+        }
+    }
+    let pretty = try JSONSerialization.data(withJSONObject: finalSession, options: [.prettyPrinted, .sortedKeys])
     FileHandle.standardOutput.write(pretty)
     FileHandle.standardOutput.write(Data("\n".utf8))
     interface.pointee.destroy?(interface.pointee.context)
