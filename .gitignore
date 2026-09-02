@@ -1,0 +1,22 @@
+# OS X
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/xcode/xcuserdata/
+.swiftpm/xcode/xcshareddata/swiftpm/Package.resolved
+
+# Xcode
+DerivedData/
+*.xcuserstate
+*.xcuserdatad
+*.xcworkspace/xcuserdata/
+
+# Build products
+*.nib
+*.plugin
+*.app
+*.framework
+*.xctest
+*.dSYM
+*.foofoilextension

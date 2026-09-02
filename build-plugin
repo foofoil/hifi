@@ -1,0 +1,35 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+SCRIPT_DIR="${0:A:h}"
+BUILD_ROOT="${TMPDIR:-/tmp}/foofoil-hifi-plugin-build"
+OUTPUT_ROOT="${1:-${TMPDIR:-/tmp}/foofoil-hifi-plugin}"
+SIGN_IDENTITY="${2:--}"
+BUNDLE_PATH="$OUTPUT_ROOT/Hi-Fi.foofoilextension"
+
+SWIFTPM_MODULECACHE_OVERRIDE="$BUILD_ROOT/module-cache" \
+CLANG_MODULE_CACHE_PATH="$BUILD_ROOT/clang-cache" \
+swift build \
+    --package-path "$SCRIPT_DIR" \
+    --disable-sandbox \
+    --scratch-path "$BUILD_ROOT" \
+    --configuration debug \
+    --product HiFiExtensionRuntime
+
+BIN_PATH=$(swift build \
+    --package-path "$SCRIPT_DIR" \
+    --disable-sandbox \
+    --scratch-path "$BUILD_ROOT" \
+    --configuration debug \
+    --show-bin-path)
+
+mkdir -p "$BUNDLE_PATH/Contents/MacOS" "$BUNDLE_PATH/Contents/Resources"
+cp "$SCRIPT_DIR/Bundle/Info.plist" "$BUNDLE_PATH/Contents/Info.plist"
+cp "$SCRIPT_DIR/ExtensionManifest.json" "$BUNDLE_PATH/Contents/Resources/ExtensionManifest.json"
+cp "$BIN_PATH/libHiFiExtensionRuntime.dylib" "$BUNDLE_PATH/Contents/MacOS/HiFiExtensionRuntime"
+chmod 755 "$BUNDLE_PATH/Contents/MacOS/HiFiExtensionRuntime"
+codesign --force --sign "$SIGN_IDENTITY" --options runtime "$BUNDLE_PATH"
+plutil -lint "$BUNDLE_PATH/Contents/Info.plist"
+
+print "$BUNDLE_PATH"

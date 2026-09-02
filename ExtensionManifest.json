@@ -1,0 +1,33 @@
+{
+  "id": "app.foofoil.extension.hifi",
+  "name": "Hi-Fi",
+  "version": "0.1.0",
+  "extensionAPI": {
+    "min": 1,
+    "max": 1
+  },
+  "system": {
+    "minMacOS": "15.0",
+    "architectures": ["arm64"]
+  },
+  "providers": [
+    {
+      "id": "audio.hifi",
+      "role": "override",
+      "fallbackProvider": "builtin.audio",
+      "enhancementDomain": "audio",
+      "contentTypes": [
+        {"extensions": ["dsf", "dff"], "strategy": "extension"},
+        {"extensions": ["iso"], "strategy": "sniff"},
+        {"utTypes": ["public.audio"], "strategy": "conforms"}
+      ]
+    }
+  ],
+  "capabilities": [
+    {"id": "session.seekable", "contractVersion": 1, "scope": "session"},
+    {"id": "media.playback-queue", "contractVersion": 1, "scope": "session"},
+    {"id": "audio.device-selection", "contractVersion": 1, "scope": "application"},
+    {"id": "ui.commands", "contractVersion": 1, "scope": "presentation"},
+    {"id": "ui.navigator", "contractVersion": 1, "scope": "presentation"}
+  ]
+}
