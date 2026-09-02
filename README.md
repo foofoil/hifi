@@ -28,14 +28,24 @@ See [docs/hifi-phase0-dsf-playback-handoff.md](docs/hifi-phase0-dsf-playback-han
 
 Compatible Extension API: v1 (`extensionAPI.min` / `max` in `ExtensionManifest.json`).
 
-## Build the Development Bundle
+## Local Playback Test
+
+Hi-Fi is not in the in-app Registry yet. For a real hardware check, keep `hifi` as a sibling of `foofoil` and start the host with its `./run` script, which builds this package and injects `Hi-Fi.foofoilextension` into the Debug app:
 
 ```sh
-chmod +x build-plugin
+cd ../foofoil
+./run
+```
+
+Then drop a Stereo DSD64 `.dsf` onto a foil, or File → Open. Use the in-window play/pause controls and the **Extensions** menu for output-device selection. Do not use Xcode ⌘R for this path: it builds foofoil without injecting the plugin.
+
+To build the bundle by itself:
+
+```sh
 ./build-plugin /tmp/foofoil-hifi-plugin
 ```
 
-This produces `Hi-Fi.foofoilextension`. During development it can be copied into foofoil's `Contents/PlugIns` after a Debug build of the host. Production installs go through foofoil's Extension Manager and will not be bundled inside `foofoil.app`.
+This produces `Hi-Fi.foofoilextension`. Production installs will go through foofoil's Extension Manager and will not be bundled inside `foofoil.app`.
 
 ## Tests and Tools
 

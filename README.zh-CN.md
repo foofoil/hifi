@@ -28,14 +28,24 @@ Hi-Fi 是 foofoil 的第一方扩展，不能作为独立播放器运行。请�
 
 兼容的 Extension API：v1（见 `ExtensionManifest.json` 中的 `extensionAPI.min` / `max`）。
 
-## 构建开发用扩展包
+## 本地播放验收
+
+Hi-Fi 尚未进入应用内 Registry。要在真实设备上试播，请把 `hifi` 放在 `foofoil` 的兄弟目录，并用宿主仓库的 `./run` 启动：它会构建本包，并把 `Hi-Fi.foofoilextension` 注入 Debug 应用。
 
 ```sh
-chmod +x build-plugin
+cd ../foofoil
+./run
+```
+
+然后将 Stereo DSD64 的 `.dsf` 拖到箔片上，或用“文件 → 打开”。窗口内可播放/暂停，菜单栏“扩展”里可选择输出设备。不要用 Xcode 的 ⌘R 做这条路径，它不会注入插件。
+
+只打扩展包：
+
+```sh
 ./build-plugin /tmp/foofoil-hifi-plugin
 ```
 
-将生成 `Hi-Fi.foofoilextension`。开发阶段可在宿主 Debug 构建后复制到 foofoil 的 `Contents/PlugIns`。正式安装走 foofoil 的 Extension Manager，不会打进 `foofoil.app`。
+将生成 `Hi-Fi.foofoilextension`。正式安装仍走 foofoil 的 Extension Manager，不会打进 `foofoil.app`。
 
 ## 测试与工具
 
