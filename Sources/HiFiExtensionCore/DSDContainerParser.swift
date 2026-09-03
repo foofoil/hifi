@@ -3,6 +3,7 @@ import Foundation
 public enum DSDContainerKind: String, Codable, Sendable {
     case dsf
     case dff
+    case sacd
 }
 
 public enum DSDCompression: String, Codable, Sendable {
@@ -47,7 +48,7 @@ public struct DSDContainerDescriptor: Codable, Equatable, Sendable {
 
     /// 按设备能力尝试的输出映射：原声道数 → 5.0 补 LFE 成 5.1/7.1 → 立体声对。
     public func playbackOutputMaps() -> [[Int?]] {
-        if kind == .dsf {
+        if kind == .dsf || kind == .sacd {
             return channelCount == 2 ? [[0, 1]] : []
         }
         guard channelCount >= 2 else { return [] }
@@ -90,15 +91,31 @@ public enum DSDContainerError: Error, Equatable, Sendable {
 }
 
 public enum DSDContainerParser {
-    /// 使用映射读取避免把大型 DSD 文件整体复制进堆内存；实际音频流读取将在 Engine 中按块进行。
+    /// 使用映射读取避免把大型 DSD 文件整体复制进堆内存；ISO 只读 TOC 扇区，不映射整盘。
     public static func parse(fileAt url: URL) throws -> DSDContainerDescriptor {
-        try parse(Data(contentsOf: url, options: .mappedIfSafe))
+        if SACDISOParser.sniff(fileAt: url) {
+            return try SACDISOParser.parse(fileAt: url).containerDescriptor()
+        }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        guard let header = try handle.read(upToCount: 4), header.count == 4 else {
+            throw DSDContainerError.truncated
+        }
+        switch String(data: header, encoding: .ascii) {
+        case "DSD ", "FRM8":
+            return try parse(Data(contentsOf: url, options: .mappedIfSafe))
+        default:
+            throw DSDContainerError.unsupportedContainer
+        }
     }
 
     public static func parse(_ data: Data) throws -> DSDContainerDescriptor {
+        if SACDISOParser.sniff(data) {
+            return try SACDISOParser.parse(data).containerDescriptor()
+        }
         switch try data.ascii(at: 0, count: 4) {
-        case "DSD ": try parseDSF(data)
-        case "FRM8": try parseDFF(data)
+        case "DSD ": return try parseDSF(data)
+        case "FRM8": return try parseDFF(data)
         default: throw DSDContainerError.unsupportedContainer
         }
     }

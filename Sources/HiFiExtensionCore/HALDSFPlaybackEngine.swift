@@ -43,7 +43,7 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
 
     public static func supportsStereoPlayback(_ descriptor: DSDContainerDescriptor) -> Bool {
         switch descriptor.kind {
-        case .dsf:
+        case .dsf, .sacd:
             descriptor.channelCount == 2
         case .dff:
             descriptor.stereoChannelIndices != nil
@@ -54,9 +54,19 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
         _ = try? stop()
     }
 
-    public func play(fileAt url: URL, deviceUID: String, startingSample: UInt64 = 0) throws {
+    public func play(
+        fileAt url: URL,
+        deviceUID: String,
+        startingSample: UInt64 = 0,
+        sacdTrackNumber: Int? = nil
+    ) throws {
         try stop()
-        let descriptor = try DSDContainerParser.parse(fileAt: url)
+        let descriptor: DSDContainerDescriptor
+        if SACDISOParser.sniff(fileAt: url) {
+            descriptor = try SACDISOParser.parse(fileAt: url).containerDescriptor(trackNumber: sacdTrackNumber)
+        } else {
+            descriptor = try DSDContainerParser.parse(fileAt: url)
+        }
         guard descriptor.compression == .rawDSD,
               let sampleCount = descriptor.sampleCount,
               Self.supportsStereoPlayback(descriptor) else {
@@ -84,14 +94,20 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
         guard let selected else {
             throw lastProbeError ?? HALDSFPlaybackError.unsupportedSource
         }
+        let stream = try DSDStreamFactory.make(
+            fileAt: url,
+            outputMap: selected.outputMap,
+            sacdTrackNumber: sacdTrackNumber
+        )
+        if startingSample > 0 {
+            try stream.seek(toSample: startingSample)
+        }
         let configured = try ConfiguredDevice(plan: selected.plan)
         do {
             let source = try DSFDoPSource(
-                fileAt: url,
-                physicalFormat: CoreAudioHALFormatProbe.describe(configured.physicalFormat),
-                outputMap: selected.outputMap
+                stream: stream,
+                physicalFormat: CoreAudioHALFormatProbe.describe(configured.physicalFormat)
             )
-            try source.seek(toSample: startingSample)
             let session = PlaybackSession(
                 configuredDevice: configured,
                 source: source,

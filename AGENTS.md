@@ -6,7 +6,7 @@ Hi-Fi is the first-party foofoil extension for high-resolution and DSD local pla
 
 This repository owns DSF/DFF/SACD parsing, DoP and CoreAudio HAL output, device selection, exclusive/hog handling, and the `foofoil_extension_create` runtime that speaks JSON value messages. Playback lists and menus are projected through foofoil's host UI; do not add a private sidebar or custom host views.
 
-Current scope is raw DSF/DFF → DoP → CoreAudio HAL. Stereo DSD64 is hardware-verified; 5.0 DFF uses native/5.1/7.1 DoP when the device exposes that carrier format, otherwise MLFT/MRGT stereo. Do not treat DSD → PCM fallback, DST / SACD ISO playback, or Registry install as already done. Device unplug/hog/sleep recovery is implemented but not yet hardware-verified; read `docs/hifi-phase0-dsf-playback-handoff.md` section 4 before changing HAL, DoP, or device lifecycle code.
+Current scope is raw DSF/DFF and uncompressed stereo SACD ISO → DoP → CoreAudio HAL. Stereo DSD64 is hardware-verified for DSF/DFF and for uncompressed stereo SACD ISO (list, seek, and sound on SMSL). 5.0 DFF uses native/5.1/7.1 DoP when the device exposes that carrier format, otherwise MLFT/MRGT stereo. Do not treat DSD → PCM fallback, DST, SACD multichannel, or Registry install as already done. Device unplug/hog/sleep recovery is implemented but not yet hardware-verified; SACD auto-advance-to-next-play just landed and still needs a two-track listen. Read `docs/hifi-phase0-dsf-playback-handoff.md` section 4 before changing HAL, DoP, SACD sector packing, or device lifecycle code.
 
 ## Core Principles
 

@@ -734,7 +734,8 @@ ContentRequest
 7. 关闭 Session 会恢复设备格式并释放 Hog Mode；切换 Provider 前宿主等待释放完成；
 8. DST、PCM fallback、Engine Service 与正式 Release 安装仍属后续工作；
 9. raw DFF 已接通 DoP/HAL：立体声 DFF DSD64 已在 SMSL 上验收；5.0 DFF 按设备格式走 5ch / 5.1 / 7.1 或立体声折混；
-10. 设备断开/占用/Hog/睡眠恢复代码已落地，待真实 DAC 手测。
+10. 设备断开/占用/Hog/睡眠恢复代码已落地，待真实 DAC 手测；
+11. 未压缩立体声 SACD ISO（3-in-14）已接通 sniff、CUE 式宿主列表、Seek 与 DoP 出流，并在 SMSL 上对 Wand 贝多芬 ISO 确认出声；DST / 多声道仍未做。
 
 ### Phase 1：DSF / DFF 可发布版本
 
@@ -744,9 +745,9 @@ ContentRequest
 
 ### Phase 2：SACD ISO
 
-完成 sniff、Stereo Area、Track 枚举、raw/DST 流、Track Seek、gapless、曲目 Navigator 与恢复。
+Stereo Area 未压缩 3-in-14/3-in-16 已接通：sniff、Track 枚举、宿主 CUE 式列表、曲目 Seek、同一 Session 内切歌。仍缺 DST 流、gapless 精修、多声道与 Session 恢复。
 
-验收：一个 ISO 建立一个 Session，所有 Track 在现有列表中可导航；不生成临时 DSF，不把 Track 伪装成多个外部文件，也不接管普通非 SACD ISO。
+验收（未压缩立体声已达到）：一个 ISO 建立一个 Session，所有 Track 在现有列表中可导航；不生成临时 DSF，不把 Track 伪装成多个外部文件，也不接管普通非 SACD ISO。
 
 ### Phase 3：增强能力
 
@@ -812,13 +813,13 @@ Hi-Fi 与 foofoil 独立发版。队列、Track ID 和设置状态需要 schema 
 
 ## 21. 建议下一步
 
-Phase 0 的 DSF/DoP 与统一列表 Spike 已打通。raw DFF 立体声已实机验收；5.0 输出随 DAC 能力选择；拔插/占用/睡眠仍待真实 DAC 手测。下一步按风险排序：
+Phase 0 的 DSF/DoP 与统一列表 Spike 已打通。raw DFF 立体声已实机验收；未压缩立体声 SACD ISO 已在 SMSL 上出声。5.0 输出随 DAC 能力选择；拔插/占用/睡眠仍待真实 DAC 手测。下一步按风险排序：
 
-1. 用真实 DAC 验收断开、占用、Hog 失败和睡眠唤醒；
-2. 有环绕 DoP DAC 时回归 5.0/5.1；完成 DSD128/256 硬件矩阵；
-3. 实现 DSD → PCM fallback 与 Automatic / Prefer DoP / Always PCM 策略；
-4. 再加入 DST、专项 metadata、Session 恢复和正式发布流程；
-5. SACD ISO 开工前先定义宿主可持久化的虚拟媒体项 contract，避免退回“一 Track 一假 URL”或插件自绘列表。用户现有 ISO 为 Stereo raw DSD64，不能当作 DFF 测试盘。
+1. 确认 SACD 自然播完会自动起播下一曲；
+2. 用真实 DAC 验收断开、占用、Hog 失败和睡眠唤醒；
+3. 有环绕 DoP DAC 时回归 5.0/5.1；完成 DSD128/256 硬件矩阵；
+4. 实现 DSD → PCM fallback 与 Automatic / Prefer DoP / Always PCM 策略；
+5. 再加入 DST、SACD 多声道、专项 metadata、Session 恢复和正式发布流程。
 
 ---
 

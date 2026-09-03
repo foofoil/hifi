@@ -4,7 +4,7 @@
 
 Hi-Fi 是 foofoil 的第一方扩展，不能作为独立播放器运行。请先安装 foofoil，再在应用内安装 Hi-Fi（或在从源码构建时加载开发用扩展包）。
 
-它为轻量 Core 补充高解析度与 DSD 播放：DSF/DFF、SACD ISO/DST（进行中）、增强系统已能播放的格式、输出设备选择、DoP，以及音乐场景下的会话能力。播放列表由 foofoil 的通用导航面板呈现，扩展不提供私有侧栏。
+它为轻量 Core 补充高解析度与 DSD 播放：DSF/DFF、未压缩立体声 SACD ISO、SACD DST（进行中）、增强系统已能播放的格式、输出设备选择、DoP，以及音乐场景下的会话能力。播放列表由 foofoil 的通用导航面板呈现，扩展不提供私有侧栏。
 
 [English](README.md)
 
@@ -12,11 +12,12 @@ Hi-Fi 是 foofoil 的第一方扩展，不能作为独立播放器运行。请�
 
 当前代码是从 foofoil `hifi-ext` 功能分支抽出的 Phase 0 开发样机：
 
-- DSF / raw DFF → DoP → CoreAudio HAL → USB DAC
+- DSF / raw DFF / 未压缩立体声 SACD ISO → DoP → CoreAudio HAL → USB DAC
 - Stereo DSD64 DSF 与立体声 DFF 已在 SMSL DAC 上验收；5.0 DFF 按设备能力输出环绕或折成立体声
+- 未压缩立体声 SACD ISO 经 `SACDMTOC` sniff 后，以 CUE 式宿主列表呈现（曲名 + 序号），从 Stereo Area 的 3-in-14/3-in-16 直接出流，不写临时 DSF；列表、Seek 与出声已在 SMSL 上确认
 - 宿主侧具备播放、暂停、进度轮询、输出设备选择和关闭时释放设备的能力
 
-这还不是正式发布。尚未完成的工作包括 DSD → PCM fallback、DST / SACD ISO、专项 metadata、Session 恢复、DSD128/256 硬件回归、进程隔离，以及可供应用内安装的签名与公证 GitHub Release。设备断开/占用/睡眠恢复已实现，待真实 DAC 手测。
+这还不是正式发布。尚未完成的工作包括 DSD → PCM fallback、DST / SACD 多声道、专项 metadata、Session 恢复、DSD128/256 硬件回归、进程隔离，以及可供应用内安装的签名与公证 GitHub Release。设备断开/占用/睡眠恢复已实现，待真实 DAC 手测。
 
 详见 [docs/hifi-phase0-dsf-playback-handoff.md](docs/hifi-phase0-dsf-playback-handoff.md) 和 [docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md](docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md)。
 

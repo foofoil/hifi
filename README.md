@@ -4,7 +4,7 @@ Advanced local audio playback extension for [foofoil](https://github.com/foofoil
 
 Hi-Fi is a first-party foofoil extension. It is not a standalone player. Install foofoil first, then install Hi-Fi from inside the app (or load a development bundle while building from source).
 
-The extension adds high-resolution and DSD playback that the lightweight foofoil core does not ship: DSF/DFF, SACD ISO/DST (in progress), enhanced handling of formats the system already plays, output-device selection, DoP, and music-oriented session features. Playback lists are projected through foofoil's shared navigator, not a private sidebar.
+The extension adds high-resolution and DSD playback that the lightweight foofoil core does not ship: DSF/DFF, uncompressed stereo SACD ISO, SACD DST (in progress), enhanced handling of formats the system already plays, output-device selection, DoP, and music-oriented session features. Playback lists are projected through foofoil's shared navigator, not a private sidebar.
 
 [简体中文](README.zh-CN.md)
 
@@ -12,11 +12,12 @@ The extension adds high-resolution and DSD playback that the lightweight foofoil
 
 The current tree is the Phase 0 development prototype extracted from foofoil's `hifi-ext` branch:
 
-- DSF / raw DFF → DoP → CoreAudio HAL → USB DAC
+- DSF / raw DFF / uncompressed stereo SACD ISO → DoP → CoreAudio HAL → USB DAC
 - Stereo DSD64 DSF and stereo DFF verified on an SMSL DAC; 5.0 DFF uses surround DoP when the device allows it, otherwise a stereo fold
+- Uncompressed stereo SACD ISO is sniffed (`SACDMTOC`), shown as a CUE-like host list (titles + track numbers), and played from Stereo Area 3-in-14/3-in-16 without writing temporary DSF. List, seek, and sound verified on SMSL
 - Host session commands for play, pause, progress, output-device selection, and device release on close
 
-Not yet a shipping release. Remaining work includes DSD → PCM fallback, DST / SACD ISO, dedicated metadata, session restore, DSD128/256 hardware regression, process isolation, and signed/notarized GitHub Releases for in-app install. Device disconnect/hog/sleep recovery is implemented and waiting on real-DAC confirmation.
+Not yet a shipping release. Remaining work includes DSD → PCM fallback, DST / SACD multichannel, dedicated metadata, session restore, DSD128/256 hardware regression, process isolation, and signed/notarized GitHub Releases for in-app install. Device disconnect/hog/sleep recovery is implemented and waiting on real-DAC confirmation.
 
 See [docs/hifi-phase0-dsf-playback-handoff.md](docs/hifi-phase0-dsf-playback-handoff.md) and [docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md](docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md).
 

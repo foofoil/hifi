@@ -42,7 +42,16 @@ public enum DSDStreamError: Error, Equatable, Sendable {
 }
 
 public enum DSDStreamFactory {
-    public static func make(fileAt url: URL, outputMap: [Int?]? = nil) throws -> any DSDStream {
+    public static func make(
+        fileAt url: URL,
+        outputMap: [Int?]? = nil,
+        sacdTrackNumber: Int? = nil
+    ) throws -> any DSDStream {
+        if SACDISOParser.sniff(fileAt: url) {
+            let disc = try SACDISOParser.parse(fileAt: url)
+            let number = sacdTrackNumber ?? disc.stereoArea?.tracks.first?.number ?? 1
+            return try SACDRawStream(fileAt: url, disc: disc, trackNumber: number)
+        }
         let descriptor = try DSDContainerParser.parse(fileAt: url)
         switch (descriptor.kind, descriptor.compression) {
         case (.dsf, .rawDSD):

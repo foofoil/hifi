@@ -3,7 +3,9 @@ import Foundation
 /// 跨 Runtime JSON 边界的稳定失败码；宿主用 localizationKey 显示英文/简体中文。
 public enum HiFiPlaybackError: Error, Equatable, Sendable {
     case invalidDSF
+    case invalidSACDISO
     case unsupportedSource
+    case unsupportedArea
     case deviceDisconnected
     case deviceBusy
     case unsupportedDoPRate
@@ -15,7 +17,9 @@ public enum HiFiPlaybackError: Error, Equatable, Sendable {
     public var localizationKey: String {
         switch self {
         case .invalidDSF: "Hi-Fi Invalid DSF"
+        case .invalidSACDISO: "Hi-Fi Invalid SACD ISO"
         case .unsupportedSource: "Hi-Fi Unsupported Source"
+        case .unsupportedArea: "Hi-Fi Unsupported SACD Area"
         case .deviceDisconnected: "Hi-Fi Device Disconnected"
         case .deviceBusy: "Hi-Fi Device Busy"
         case .unsupportedDoPRate: "Hi-Fi Unsupported DoP Rate"
@@ -29,7 +33,9 @@ public enum HiFiPlaybackError: Error, Equatable, Sendable {
     public init?(localizationKey: String) {
         switch localizationKey {
         case "Hi-Fi Invalid DSF": self = .invalidDSF
+        case "Hi-Fi Invalid SACD ISO": self = .invalidSACDISO
         case "Hi-Fi Unsupported Source": self = .unsupportedSource
+        case "Hi-Fi Unsupported SACD Area": self = .unsupportedArea
         case "Hi-Fi Device Disconnected": self = .deviceDisconnected
         case "Hi-Fi Device Busy": self = .deviceBusy
         case "Hi-Fi Unsupported DoP Rate": self = .unsupportedDoPRate
@@ -47,6 +53,7 @@ public enum HiFiPlaybackError: Error, Equatable, Sendable {
         if let error = error as? HALDSFPlaybackError { return from(error) }
         if let error = error as? DSDContainerError { return from(error) }
         if let error = error as? DSDStreamError { return from(error) }
+        if let error = error as? SACDISOError { return from(error) }
         let nsError = error as NSError
         if nsError.domain == NSCocoaErrorDomain,
            [NSFileReadNoPermissionError, NSFileReadNoSuchFileError, NSFileReadUnknownError]
@@ -86,6 +93,14 @@ public enum HiFiPlaybackError: Error, Equatable, Sendable {
         case .unsupportedFormat: .unsupportedSource
         case .invalidSeekPosition, .seekMustBeByteAligned: .seekIndexFailure
         default: .invalidDSF
+        }
+    }
+
+    private static func from(_ error: SACDISOError) -> HiFiPlaybackError {
+        switch error {
+        case .missingStereoArea: .unsupportedArea
+        case .unsupportedFrameFormat: .unsupportedSource
+        default: .invalidSACDISO
         }
     }
 }

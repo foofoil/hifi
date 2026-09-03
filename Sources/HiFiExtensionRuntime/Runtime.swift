@@ -59,19 +59,41 @@ private func prepareSources(request: [String: Any]) throws -> [RuntimeSource] {
     case "fileCollection": resources = request["resources"] as? [[String: Any]] ?? []
     default: resources = []
     }
-    return try resources.enumerated().map { index, resource in
+    return try resources.enumerated().flatMap { index, resource -> [RuntimeSource] in
         guard let urlString = resource["url"] as? String,
               let fallbackURL = URL(string: urlString), fallbackURL.isFileURL else {
             throw RuntimeControllerError.invalidSource
         }
         let access = RuntimeResourceAccess(resource: resource, fallbackURL: fallbackURL)
+        if SACDISOParser.sniff(fileAt: access.url) {
+            let disc = try SACDISOParser.parse(fileAt: access.url)
+            guard let area = disc.stereoArea else { throw SACDISOError.missingStereoArea }
+            guard area.frameFormat != .dst else { throw SACDISOError.unsupportedFrameFormat }
+            return try area.tracks.map { track in
+                let descriptor = try disc.containerDescriptor(trackNumber: track.number)
+                guard descriptor.compression == .rawDSD,
+                      descriptor.sampleCount != nil,
+                      HALDSFPlaybackEngine.supportsStereoPlayback(descriptor) else {
+                    throw RuntimeControllerError.invalidSource
+                }
+                return RuntimeSource(
+                    id: "track:stereo:\(String(format: "%02d", track.number))",
+                    access: access,
+                    descriptor: descriptor,
+                    title: track.title,
+                    artist: track.artist,
+                    album: disc.displayTitle,
+                    sacdTrackNumber: track.number
+                )
+            }
+        }
         let descriptor = try DSDContainerParser.parse(fileAt: access.url)
         guard descriptor.compression == .rawDSD,
               descriptor.sampleCount != nil,
               HALDSFPlaybackEngine.supportsStereoPlayback(descriptor) else {
             throw RuntimeControllerError.invalidSource
         }
-        return RuntimeSource(id: "file:\(index)", access: access, descriptor: descriptor)
+        return [RuntimeSource(id: "file:\(index)", access: access, descriptor: descriptor)]
     }
 }
 
@@ -272,13 +294,26 @@ private func queueObject(
     revision: UInt64 = 0
 ) -> [String: Any] {
     let items: [[String: Any]] = sources.map {
-        var item: [String: Any] = ["id": $0.id, "title": $0.url.lastPathComponent,
-            "symbolName": "waveform", "isPlayable": true]
+        var item: [String: Any] = [
+            "id": $0.id,
+            "title": $0.displayTitle,
+            "symbolName": "waveform",
+            "isPlayable": true
+        ]
+        if let artist = $0.artist { item["subtitle"] = artist }
         if let duration = $0.descriptor.duration { item["duration"] = duration }
         return item
     }
-    return ["contractVersion": 1, "items": items,
-     "currentItemID": currentID, "repeatMode": "off", "isShuffled": false, "revision": revision]
+    var object: [String: Any] = [
+        "contractVersion": 1,
+        "items": items,
+        "currentItemID": currentID,
+        "repeatMode": "off",
+        "isShuffled": false,
+        "revision": revision
+    ]
+    if let album = sources.first?.album { object["title"] = album }
+    return object
 }
 
 private func navigatorObject(
@@ -286,20 +321,31 @@ private func navigatorObject(
     currentID: String,
     revision: UInt64 = 0
 ) -> [String: Any] {
-    ["id": "hifi.playback-queue", "contractVersion": 1, "titleLocalizationKey": "Hi-Fi Audio",
-     "style": "flat", "selectionMode": "single", "items": sources.map {
-        var item: [String: Any] = [
-            "id": $0.id,
-            "title": $0.url.lastPathComponent,
-            "symbolName": "waveform",
-            "isEnabled": true,
-            "isCurrent": $0.id == currentID
-        ]
-        if let duration = $0.descriptor.duration {
-            item["badge"] = formatDuration(duration)
-        }
-        return item
-     }, "selectedItemIDs": [currentID], "allowedActions": ["activate", "move"], "revision": revision]
+    let isContainer = sources.contains { $0.sacdTrackNumber != nil }
+    return [
+        "id": "hifi.playback-queue",
+        "contractVersion": 1,
+        "titleLocalizationKey": "Hi-Fi Audio",
+        "style": "flat",
+        "selectionMode": "single",
+        "items": sources.map { source -> [String: Any] in
+            var item: [String: Any] = [
+                "id": source.id,
+                "title": source.displayTitle,
+                "symbolName": "waveform",
+                "isEnabled": true,
+                "isCurrent": source.id == currentID
+            ]
+            if let artist = source.artist { item["subtitle"] = artist }
+            if let duration = source.descriptor.duration {
+                item["badge"] = formatDuration(duration)
+            }
+            return item
+        },
+        "selectedItemIDs": [currentID],
+        "allowedActions": isContainer ? ["activate"] : ["activate", "move"],
+        "revision": revision
+    ]
 }
 
 private func formatDuration(_ seconds: TimeInterval) -> String {
@@ -355,7 +401,8 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 try player.play(
                     fileAt: record.url,
                     deviceUID: deviceUID,
-                    startingSample: record.samplePosition
+                    startingSample: record.samplePosition,
+                    sacdTrackNumber: record.sacdTrackNumber
                 )
                 record.playbackState = "playing"
                 record.underrunCount = 0
@@ -402,7 +449,12 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                     guard let deviceUID = record.selectedDeviceID else {
                         throw RuntimeControllerError.noOutputDevice
                     }
-                    try player.play(fileAt: record.url, deviceUID: deviceUID, startingSample: targetSample)
+                    try player.play(
+                        fileAt: record.url,
+                        deviceUID: deviceUID,
+                        startingSample: targetSample,
+                        sacdTrackNumber: record.sacdTrackNumber
+                    )
                     record.playbackState = "playing"
                     record.failureDescription = nil
                     lock.lock()
@@ -527,15 +579,24 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         if wasPlaying { playingSessionID = nil }
         lock.unlock()
         if wasPlaying { _ = try? player.stop() }
+        // 宿主列表切歌时，自然播完已经把 playingSessionID 清掉；若上一曲已到结尾，仍应接着播。
+        let reachedEnd = record.sampleCount > 0 && record.samplePosition + 16 >= record.sampleCount
+        let completedNaturally = record.playbackState == "stopped"
+            || (record.playbackState == "paused" && reachedEnd)
+        let shouldPlay = wasPlaying || completedNaturally
         record.currentIndex = index
         record.queueRevision &+= 1
         record.samplePosition = 0
         record.underrunCount = 0
         record.failureDescription = nil
         record.playbackState = "paused"
-        if wasPlaying, let deviceUID = record.selectedDeviceID {
+        if shouldPlay, let deviceUID = record.selectedDeviceID {
             do {
-                try player.play(fileAt: record.url, deviceUID: deviceUID)
+                try player.play(
+                    fileAt: record.url,
+                    deviceUID: deviceUID,
+                    sacdTrackNumber: record.sacdTrackNumber
+                )
                 record.playbackState = "playing"
                 lock.lock(); playingSessionID = record.id; lock.unlock()
             } catch {
@@ -589,6 +650,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             && status.state == .stopped
             && status.samplePosition >= record.sampleCount
             && record.currentIndex + 1 < record.sources.count
+            && !record.isSACDContainer
         lock.unlock()
         if shouldAdvance {
             record.samplePosition = status.samplePosition
@@ -662,6 +724,8 @@ private final class RuntimeSession {
     var url: URL { sources[currentIndex].url }
     var sampleRate: Int { sources[currentIndex].descriptor.sampleRate }
     var sampleCount: UInt64 { sources[currentIndex].descriptor.sampleCount ?? 0 }
+    var sacdTrackNumber: Int? { sources[currentIndex].sacdTrackNumber }
+    var isSACDContainer: Bool { sources.contains { $0.sacdTrackNumber != nil } }
     var selectedDeviceID: String?
     var samplePosition: UInt64 = 0
     var underrunCount: UInt64 = 0
@@ -683,12 +747,34 @@ private final class RuntimeSource {
     let id: String
     let access: RuntimeResourceAccess
     let descriptor: DSDContainerDescriptor
+    let title: String?
+    let artist: String?
+    let album: String?
+    let sacdTrackNumber: Int?
     var url: URL { access.url }
+    var displayTitle: String {
+        let value = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let value, !value.isEmpty { return value }
+        if let sacdTrackNumber { return "Track \(sacdTrackNumber)" }
+        return url.deletingPathExtension().lastPathComponent
+    }
 
-    init(id: String, access: RuntimeResourceAccess, descriptor: DSDContainerDescriptor) {
+    init(
+        id: String,
+        access: RuntimeResourceAccess,
+        descriptor: DSDContainerDescriptor,
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        sacdTrackNumber: Int? = nil
+    ) {
         self.id = id
         self.access = access
         self.descriptor = descriptor
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.sacdTrackNumber = sacdTrackNumber
     }
 }
 

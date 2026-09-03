@@ -18,7 +18,8 @@
       "enhancementDomain": "audio",
       "contentFamily": "audio",
       "contentTypes": [
-        {"extensions": ["dsf", "dff"], "strategy": "extension"}
+        {"extensions": ["dsf", "dff"], "strategy": "extension"},
+        {"extensions": ["iso"], "strategy": "sniff"}
       ]
     }
   ],

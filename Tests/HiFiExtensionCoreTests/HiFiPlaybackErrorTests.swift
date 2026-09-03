@@ -15,6 +15,8 @@ struct HiFiPlaybackErrorTests {
         #expect(HiFiPlaybackError.from(DSDContainerError.truncated) == .invalidDSF)
         #expect(HiFiPlaybackError.from(DSDContainerError.invalidFormat) == .invalidDSF)
         #expect(HiFiPlaybackError.from(DSDContainerError.unsupportedCompression("DST ")) == .unsupportedSource)
+        #expect(HiFiPlaybackError.from(SACDISOError.truncated) == .invalidSACDISO)
+        #expect(HiFiPlaybackError.from(SACDISOError.missingStereoArea) == .unsupportedArea)
         #expect(HiFiPlaybackError.from(HALDSFPlaybackError.invalidStartPosition) == .seekIndexFailure)
         #expect(HiFiPlaybackError.from(DSDStreamError.seekMustBeByteAligned) == .seekIndexFailure)
         #expect(

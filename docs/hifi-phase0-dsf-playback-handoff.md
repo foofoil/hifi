@@ -2,7 +2,7 @@
 
 > 更新日期：2026-09-03
 >
-> 当前里程碑：Stereo DSD64 DSF/DFF 已在 SMSL DAC 上实机播放；5.0 DFF 在立体声 DAC 上走 MLFT/MRGT 折混，设备提供 5/6/8 声道 DoP 格式时按 5.0/5.1/7.1 输出。DAC 释放屏障与切歌播放意图已提交。设备断开/占用/Hog/睡眠恢复已实现，**仍待真实 DAC 手测**（见第 4.2 节）。
+> 当前里程碑：Stereo DSD64 DSF/DFF 已在 SMSL DAC 上实机播放；5.0 DFF 在立体声 DAC 上走 MLFT/MRGT 折混，设备提供 5/6/8 声道 DoP 格式时按 5.0/5.1/7.1 输出。未压缩立体声 SACD ISO（3-in-14）已在同一 SMSL 上实机播放：CUE 式曲目列表、Seek、DoP 出声均已确认。DAC 释放屏障与切歌播放意图已提交。设备断开/占用/Hog/睡眠恢复已实现，**仍待真实 DAC 手测**（见第 4.2 节）。DST / SACD 多声道仍未做。
 >
 > 用途：新会话中的 agent 应先读本文，再读 `foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md`，保留三个仓库的现有改动并从第 9 节继续。
 
@@ -23,7 +23,7 @@ foofoil/
 - `extension-kit` 只定义稳定、可序列化、跨仓库的通用契约；`ExtensionContentFamily.audio` 用来把扩展格式归入宿主音频家族；
 - `hifi` 拥有高级格式解析、DSD 数据、DoP、HAL、设备探测和独占资源，不依赖宿主的 `FileListState`、SwiftUI View 或 `NSImage`；
 - 外部 MP3/FLAC/DSF 等文件共享一个宿主 `FileListState(kind: .audio)`。选择当前项后才由 Provider Resolver 决定 Built-in Audio 或 `audio.hifi`；
-- SACD ISO Track 没有独立 URL。以后应增加版本化虚拟媒体项 contract，由插件维护 Track 真相、宿主复用 Navigator UI；不得生成临时 DSF 或自绘第二套列表。
+- SACD ISO Track 没有独立 URL。第一版把同一 ISO 的曲目投影成宿主 `FileListState`（与 CUE 相同的专辑标题、曲目行、时长 badge、不可重排），插件 Session 持有 TOC/出流真相；不得生成临时 DSF 或自绘第二套列表。
 
 ## 2. 当前可工作的播放链路
 
@@ -32,7 +32,7 @@ foofoil/
 → Provider Resolver
 → audio.hifi 单文件 ContentSession
 → Hi-Fi in-process C ABI Runtime
-→ DSFRawStream / DFFRawStream（DSF channel-block + LSB-first 归一化；DFF 交织 + MSB-first）
+→ DSFRawStream / DFFRawStream / SACDRawStream（DSF channel-block + LSB-first 归一化；DFF/SACD 交织 + MSB-first）
 → DSFDoPSource / DoPOutputTimeline
 → SPSCFloatRingBuffer
 → CoreAudio HAL IOProc
@@ -41,7 +41,7 @@ foofoil/
 
 当前确认范围：
 
-- 容器：DSF 与 raw DFF（DST 压缩 DFF 仍拒绝）；
+- 容器：DSF、raw DFF，以及未压缩立体声 SACD ISO（DST 压缩 DFF/ISO 仍拒绝）；
 - 编码：raw DSD；
 - 声道：立体声已实测；5.0 DFF 按设备能力输出 5ch / 5.1（补静音 LFE）/ 7.1 或折成立体声对；
 - 已实测：DSD64 / 2.8224 MHz，DSF 立体声与 DFF 立体声（SMSL）；5.0 DFF 在 SMSL 上为立体声折混；
@@ -55,7 +55,7 @@ foofoil/
 不要把下列能力误认为已完成：
 
 - DSD → PCM fallback；
-- DST DFF 或 SACD ISO 播放；
+- DST DFF 或 SACD 多声道 / DST ISO 播放；
 - DSD128 / DSD256 的真实硬件回归；
 - 5.0/5.1/7.1 DoP 在环绕 DAC 上的真实硬件回归（代码已按格式探测选择，SMSL 上仍走立体声折混）；
 - 设备断开/占用/Hog/睡眠恢复的真实 DAC 手测（代码已落地，见第 4.2 节）；
@@ -71,10 +71,11 @@ foofoil/
 ```text
 普通音频文件 ─┐
 DSF 文件 ─────┼→ Host FileListState → builtin.file-list Navigator → 同一套 UI
-DFF 文件 ─────┘                         │
-                                        └→ activate 当前 URL
+DFF 文件 ─────┤                         │
+SACD ISO ─────┘                         └→ activate 当前 URL / 容器曲目
                                             → Provider Resolver
                                             → Built-in 或 Hi-Fi
+                                            （ISO 曲目复用同一 Session）
 ```
 
 具体规则：
@@ -112,6 +113,28 @@ DFF 文件 ─────┘                         │
 - SMSL 无 5/6/8 声道 176.4 kHz 整数格式，5.0 文件走立体声折混；环绕 DAC 上的 5.0/5.1 输出尚未实机确认；
 - 右上角状态会标明 `5ch · DoP`、`5.0→5.1 · DoP` 或 `5ch→Stereo · DoP`；
 - DST 压缩 DFF 仍然不可播放。
+
+### 4.4 未压缩立体声 SACD ISO（列表、Seek、出声已手测）
+
+实测盘：Gunter Wand / NDR《Beethoven Symphonies Nos.2 & 6》ISO（TWOCHTOC only，3-in-14，9 曲，约 3.1 GB）。输出仍是 SMSL USB AUDIO DSD64 DoP。
+
+用户已确认：
+
+1. 拖入 ISO 后宿主列表为 CUE 式：专辑标题、CUE 徽标、曲目标题、左侧序号、时长 badge，不可重排；
+2. Seek 松手后定位正确，不中断播放；
+3. 出声与同一套录音的 DSF 一致，不再是恒定高压线噪声或一截一截的音乐。
+
+实现要点，不要退回去：
+
+- 未压缩扇区的 `frame_info_count` 只计数，4 字节 DST 表仅 `dstEncoded` 时存在；
+- 类型 2 包若以 `00 00 00` 开头且本扇区有 1…3 字节尾巴，这 3 字节是标记不是 DSD；尾巴仍是音频，必须接上。24 bit 全 0 按帧注入会听成恒定电流声；
+- 同一扇区可能在凑满一帧后还有下一帧的开头。必须先吃完本扇区所有音频包和尾巴，再出帧；中途 return 会丢掉约 672 字节，听感不连续；
+- 帧布局与 DFF 相同：逐字节 LRLR、MSB-first。不要按 16-bit 字交错拆；
+- Seek：按约 14 扇区 / 3 帧落到附近 LSN，再靠 `frame_start` 对齐；`HALDSFPlaybackEngine.play` 在 Hog 之前 seek 流；
+- 曲目文字块前常见 `02 00 00 00`（条目数，小端），然后才是 type + C 字符串；跳过该头才能读到 `Sinfonie Nr.2 …` 而不是退回 `Track 1`；
+- SACD 自然播完由宿主列表切到下一曲。Runtime 在切项时若上一曲已到结尾，必须继续 `play`：播完时 `playingSessionID` 已清空，不能只看「当前是否在播」。暂停后再点下一曲仍保持暂停。此续播路径刚落地，**待用户再听两曲确认**。
+
+不要把下列情况当成已验收：DST ISO、SACD 多声道、普通 `.iso`。
 
 ## 5. 不可回退的 DoP 数据约束
 
@@ -161,13 +184,19 @@ DFF 补充：
 - 立体声 raw DFF DSD64 已在同一 SMSL 上播放；
 - 5.0 raw DFF 在该设备上折成 `MLFT`/`MRGT` 立体声 DoP；不要把「能出声」当成 5.0 环绕已验收。
 
+SACD ISO 补充：
+
+- 未压缩立体声 3-in-14 ISO 已在同一 SMSL 上播放；Seek 与列表已确认；
+- 不要把 DST 或多声道 ISO 当成同一验收。
+
 ## 7. 代码地图
 
 ### `hifi`
 
-- `ExtensionManifest.json`：匹配 `dsf` / `dff`，声明 `enhancementDomain`、`contentFamily: audio` 和已接通 capability；DST DFF 仍拒绝播放；
+- `ExtensionManifest.json`：匹配 `dsf` / `dff`，对 `iso` 使用 sniff；声明 `enhancementDomain`、`contentFamily: audio` 和已接通 capability；DST DFF/ISO 仍拒绝播放；
 - `build-plugin`：构建、组装并签名 `.foofoilextension`；
-- `Sources/HiFiExtensionCore/DSDContainerParser.swift`：DSF/DFF descriptor parser；
+- `Sources/HiFiExtensionCore/DSDContainerParser.swift`：DSF/DFF descriptor parser；ISO 走 `SACDISOParser`，不映射整盘；
+- `Sources/HiFiExtensionCore/SACDISOParser.swift`、`SACDAudioSector.swift`、`SACDRawStream.swift`：Scarlet Book TOC、扇区拆包、未压缩立体声曲目流；
 - `Sources/HiFiExtensionCore/DSFRawStream.swift`、`DFFRawStream.swift`：DSF channel-block / DFF 交织读取；DFF 可按 `outputMap` 输出原声道、5.1/7.1 补静音或立体声对；
 - `Sources/HiFiExtensionCore/DoPFrameEncoder.swift`、`DoPOutputTimeline.swift`、`DSFDoPSource.swift`：DoP 数据与连续输出时间线；
 - `Sources/HiFiExtensionCore/HiFiPlaybackError.swift`、`DeviceLifecycleWatch.swift`：结构化错误与拔出/占用/睡眠监听；
@@ -186,7 +215,7 @@ DFF 补充：
 
 ### `foofoil`
 
-- `foofoil/FileList.swift`、`AppState/AppState+FileList.swift`：统一外部音频列表、拖拽排序、导航和播放模式；
+- `foofoil/FileList.swift`、`AppState/AppState+FileList.swift`：统一外部音频列表、CUE/SACD 曲目投影、拖拽排序、导航和播放模式；
 - `foofoil/ExtensionKit/ExtensionHost.swift`：provider 路由、Debug runtime 装载及可等待 close；
 - `foofoil/ExtensionKit/InProcessContentProvider.swift`：C ABI JSON 到内部 Provider 的适配；
 - `foofoil/ExtensionKit/ExtensionAudioModeView.swift`：扩展状态到宿主媒体控制协议的适配；
@@ -198,7 +227,7 @@ DFF 补充：
 
 ## 8. 实时线程约束
 
-文件 worker 负责文件 I/O、DSF block 拆分、DFF 交织拆分、bit reversal、声道映射、DoP 编码和 ring 写入。HAL callback 只能读取预分配 ring、写现有 output buffer、补合法 DoP silence 和更新 atomic 计数。Ring 的 `channelCount` 随当前 physical format 变化，不再写死为 2。
+文件 worker 负责文件 I/O、DSF block 拆分、DFF 交织拆分、SACD 扇区组装、bit reversal、声道映射、DoP 编码和 ring 写入。HAL callback 只能读取预分配 ring、写现有 output buffer、补合法 DoP silence 和更新 atomic 计数。Ring 的 `channelCount` 随当前 physical format 变化，不再写死为 2。
 
 HAL callback 禁止文件 I/O、锁、内存分配、JSON、日志或 Swift collection 扩容。当前 ring 容量 131072 frame，预缓冲 32768 frame，worker chunk 4096 frame。
 
@@ -208,20 +237,21 @@ HAL callback 禁止文件 I/O、锁、内存分配、JSON、日志或 Swift coll
 
 截至本文更新时：
 
-- `hifi`：raw DFF、5.0 输出布局、设备恢复与结构化错误与本文一并提交；
-- `extension-kit` 基线提交：`356ae55 feat: add contentFamily to provider declaration`，工作树应为空；
-- `foofoil` 已提交 DAC 释放屏障 `666e149` 与切歌播放意图 `4f5ae49`；DFF 文档类型、打开面板与错误本地化与宿主改动一并提交；
-- 第 4.1 节切换手测已通过；第 4.3 节立体声 DFF 与 5.0 折混已通过；第 4.2 节设备恢复手测尚未做；
-- 核心测试 22 项，以 `swift test` 为准。
+- `hifi`：raw DFF、5.0 输出布局、设备恢复、未压缩立体声 SACD ISO 出流与本文一并提交；
+- `extension-kit`：`MediaPlaybackQueueSnapshot.title` 供容器专辑标题使用；旧 queue JSON 仍可解码；
+- `foofoil` 已提交 DAC 释放屏障 `666e149`、切歌播放意图 `4f5ae49` 与 seek-on-release `0f77844`；ISO sniff、CUE 式曲目列表（曲名 + 左侧序号）与 Session 复用与本次改动一并提交；
+- 第 4.1 节切换手测已通过；第 4.3 节立体声 DFF 与 5.0 折混已通过；第 4.4 节 SACD ISO 列表/Seek/出声已通过；第 4.2 节设备恢复手测尚未做；SACD 自然续播刚修，待再听两曲；
+- 核心测试以 `swift test` 为准；本地 ISO 存在时 `SACDISOParserTests` 会对照同专辑 DSF 前 16384 字节。
 
 建议下一步顺序：
 
-1. 用户完成第 4.2 节真实 DAC 设备恢复手测；
-2. 有环绕 DoP DAC 时回归 5.0/5.1 输出；用真实设备回归 DSD128 / DSD256；
-3. 实现 DSD → PCM fallback 以及 Automatic / Prefer DoP / Always PCM；
-4. 补 DSF/DFF 专项 metadata、设置和真正可恢复 Session；
-5. DST 与 SACD ISO；ISO 开工前先完成虚拟媒体项 contract。用户手头 SACD ISO 为 Stereo Area、未压缩 DSD64（3-in-14），可作 ISO 第一刀的测试盘，但不能用来测 DFF；
-6. 最后评估 Engine Service/XPC 和正式 Release 安装、升级、签名流程。
+1. 用户再听 SACD 两曲，确认自然播完会自动起播下一曲；
+2. 用户完成第 4.2 节真实 DAC 设备恢复手测；
+3. 有环绕 DoP DAC 时回归 5.0/5.1 输出；用真实设备回归 DSD128 / DSD256；
+4. 实现 DSD → PCM fallback 以及 Automatic / Prefer DoP / Always PCM；
+5. 补 DSF/DFF 专项 metadata、设置和真正可恢复 Session；
+6. DST 与 SACD 多声道；
+7. 最后评估 Engine Service/XPC 和正式 Release 安装、升级、签名流程。
 
 Phase 1 的验收不是 parser 能读 DFF，而是 DSF/DFF 能从 Finder、拖放和混合列表进入同一宿主体验；DoP 不可用时自动 PCM；Seek、切歌、设备切换和恢复不会遗留设备状态。
 
@@ -258,6 +288,7 @@ cd ../hifi
 swift run hifi-inspect --devices
 swift run hifi-inspect --stream-check '/path/to/file.dsf'
 swift run hifi-inspect --stream-check '/path/to/file.dff'
+swift run hifi-inspect --stream-check '/path/to/disc.iso'
 ```
 
 Codex 受限沙箱可能无法访问 CoreAudio device、CoreSimulator 或用户 SwiftPM cache。真实硬件和 GUI 结论以用户桌面会话执行结果为准。

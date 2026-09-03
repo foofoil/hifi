@@ -12,15 +12,27 @@ public final class DSFDoPSource {
     private let physicalFormat: HiFiAudioPhysicalFormat
     private var encoder = DoPFrameEncoder()
 
-    public init(
+    public convenience init(
         fileAt url: URL,
         physicalFormat: HiFiAudioPhysicalFormat,
-        outputMap: [Int?]? = nil
+        outputMap: [Int?]? = nil,
+        sacdTrackNumber: Int? = nil
     ) throws {
-        stream = try DSDStreamFactory.make(fileAt: url, outputMap: outputMap)
+        try self.init(
+            stream: try DSDStreamFactory.make(
+                fileAt: url,
+                outputMap: outputMap,
+                sacdTrackNumber: sacdTrackNumber
+            ),
+            physicalFormat: physicalFormat
+        )
+    }
+
+    public init(stream: any DSDStream, physicalFormat: HiFiAudioPhysicalFormat) throws {
         guard stream.format.channelCount == Int(physicalFormat.channelCount) else {
             throw DSDStreamError.unsupportedFormat
         }
+        self.stream = stream
         channelCount = stream.format.channelCount
         dsdSampleRate = stream.format.sampleRate
         self.physicalFormat = physicalFormat

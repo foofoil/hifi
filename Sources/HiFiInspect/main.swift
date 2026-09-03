@@ -27,7 +27,7 @@ let arguments = Array(CommandLine.arguments.dropFirst())
 guard arguments == ["--devices"] || arguments.count == 1
         || (arguments.count == 2 && arguments[0] == "--stream-check") else {
     FileHandle.standardError.write(Data(
-        "Usage: hifi-inspect <file.dsf|file.dff|--devices> | hifi-inspect --stream-check <file.dsf|file.dff>\n".utf8
+        "Usage: hifi-inspect <file.dsf|file.dff|file.iso|--devices> | hifi-inspect --stream-check <file.dsf|file.dff|file.iso>\n".utf8
     ))
     exit(64)
 }
