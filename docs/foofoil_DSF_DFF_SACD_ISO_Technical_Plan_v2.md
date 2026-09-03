@@ -1,6 +1,6 @@
 # foofoil Hi-Fi 插件：DSF / DFF / SACD ISO 技术方案
 
-> 文档状态：基于 foofoil 已具备扩展系统、内容 Provider、Content Session、通用列表与 Navigator Host 的现状重新设计（v2）。
+> 文档状态：2026-09-03 按三个独立仓库的现行实现校准（v2）。`foofoil` 是宿主应用，`extension-kit` 是稳定扩展契约，`hifi` 是独立第一方扩展。
 >
 > 核心结论：DSF、DFF、SACD ISO、DST、DoP、DSD → PCM、专业设备路由等高级音频能力不进入 foofoil Core，而由第一方可选组件 **Hi-Fi** 提供；SACD ISO 等多曲目内容使用 foofoil 现有列表界面呈现，不在插件中另造曲目列表 UI。
 
@@ -26,15 +26,20 @@
 foofoil Core
 ├── 浮动窗口与通用音频外壳
 ├── Provider 选择与 Session 生命周期
-├── 列表 / Navigator Host
+├── 外部文件列表、播放顺序与 Navigator Host
 ├── 菜单、快捷键、本地化与辅助功能
 ├── 扩展安装、验证、升级、禁用和恢复
 └── 系统原生普通音频 Provider
 
+FoofoilExtensionKit
+├── Manifest / Provider / Content Session 值类型
+├── contentFamily 与 capability contracts
+└── 跨仓库稳定 C ABI / JSON 消息边界
+
 Hi-Fi 插件
 ├── 高级音频格式识别与解析
 ├── DSF / DFF / SACD ISO / DST
-├── DSDStream 与播放队列语义
+├── DSDStream 与容器内部 Track 语义
 ├── DoP 与 DSD → PCM
 ├── CoreAudio HAL、设备探测与独占输出
 ├── 高级音频 metadata
@@ -70,7 +75,7 @@ foofoil 现有列表面板显示曲目
 选择曲目后由同一 Hi-Fi Session 播放
 ```
 
-Hi-Fi 也可以作为普通音频的增强 Provider，按用户偏好接管 MP3、AAC、ALAC、FLAC、WAV、AIFF 等会话，以提供统一播放队列、输出设备选择和专业输出能力。普通音频始终保留 Built-in Audio Provider 作为回退。
+将来 Hi-Fi 可以作为普通音频的增强 Provider，按用户偏好接管 MP3、AAC、ALAC、FLAC、WAV、AIFF 等解码或输出能力。当前 `0.1.0` manifest 只声明 `.dsf`，普通音频始终由 Built-in Audio Provider 播放；两类文件已经共享同一个宿主音频列表。
 
 ### 2.1 第一阶段：Hi-Fi 基础链路
 
@@ -138,16 +143,16 @@ CommandDescriptor
 
 Core 不理解 DSD sample layout、DST frame、SACD sector、DoP marker 或某个 DAC 的格式能力。
 
-### 3.2 复用列表，不复制 UI
+### 3.2 统一列表归宿主，解码按当前项目路由
 
-Hi-Fi 负责队列语义和项目数据，foofoil 负责列表的原生呈现、选择、键盘导航、辅助功能、伴随窗口与全屏覆盖层。
+外部音频文件不因解码器不同而拆成两种列表。MP3/FLAC 等普通音频和 DSF/DFF 等扩展音频统一进入 foofoil 的 `FileListState(kind: .audio)`；拖入、去重、排序、移除、当前项、循环/随机、自动续播、键盘操作、动态图标和持久化均由宿主实现。用户选择某一项后，宿主才调用 Provider Resolver，决定由 Built-in Audio 还是 Hi-Fi 解码。
 
-必须区分两层：
+必须区分两类项目：
 
-- `media.playback-queue`：顺序、当前项、自动续播、重排、移除、gapless 和恢复；
-- `ui.navigator`：把队列或容器目录转换为宿主可展示的列表/树快照，并接收用户动作。
+- **外部文件项**：真实 URL 和书签由宿主列表持有，Hi-Fi 每次只建立当前文件的播放 Session，不复制列表顺序；
+- **容器虚拟项**：SACD ISO Track 没有独立 URL，未来由版本化的虚拟媒体项/queue contract 表达，插件维护 Track 真相，宿主负责呈现和交互。
 
-Hi-Fi 通常同时提供两种 capability。不能把 Navigator 当成播放队列本身，也不能让 Core 从列表行反推播放语义。
+`media.playback-queue` 与 `ui.navigator` 仍保留，用于兼容旧的多文件 Session、容器 Track 和未来跨扩展协议；它们不是当前 DSF 外部文件列表的所有权依据。不能让插件自绘第二套列表，也不能让 Core 理解 SACD sector 等解码细节。
 
 ### 3.3 DSD 优先保持 DSD
 
@@ -200,8 +205,9 @@ SACD ISO 是一个外部受权资源，Track 是其中的逻辑项目。不能�
 | DSF / DFF / SACD ISO | 不解析 | 负责 |
 | DST、DSD → PCM、DoP | 不实现 | 负责 |
 | 设备探测与 HAL 实时输出 | 不理解协议细节 | 负责 |
-| 曲目/队列语义 | 转发通用动作 | 负责并维护真实状态 |
-| 列表外观和交互 | 使用现有 Navigator Host | 提供值类型快照 |
+| 外部文件列表与播放顺序 | 负责并维护唯一真实状态 | 只播放当前路由到插件的文件 |
+| SACD 容器 Track 语义 | 持有通用虚拟媒体项并转发动作 | 解析并维护 Track 真实状态 |
+| 列表外观和交互 | 使用现有 FileList / Navigator Host | 为虚拟 Track 提供值类型快照 |
 | 菜单与快捷键 | 构造、校验、路由 | 提供命令描述和执行结果 |
 | 本地化 chrome | 负责 | 提供已注册 localization key |
 | metadata 内容值 | 展示 | 解析和更新 |
@@ -214,10 +220,12 @@ Hi-Fi 不向 Core 暴露 Swift/C++ decoder 对象、`NSView`、`NSImage`、文�
 
 ## 5. 扩展声明与 Provider 选择
 
-Hi-Fi 建议使用独立仓库和独立 Release：
+Hi-Fi 已从宿主拆为独立兄弟仓库，并独立 Release。开发工作区布局为：
 
 ```text
-foofoil/foofoil-extension-hifi
+foofoil/         # 宿主应用
+extension-kit/   # 扩展契约 Swift Package
+hifi/            # Hi-Fi 扩展
 ```
 
 Manifest 概念示例：
@@ -230,23 +238,23 @@ Manifest 概念示例：
     "id": "audio.hifi",
     "role": "override",
     "fallbackProvider": "builtin.audio",
+    "enhancementDomain": "audio",
+    "contentFamily": "audio",
     "contentTypes": [
-      {"extensions": ["dsf", "dff"], "strategy": "extension"},
-      {"extensions": ["iso"], "strategy": "sniff"},
-      {"utTypes": ["public.audio"], "strategy": "conforms"}
+      {"extensions": ["dsf"], "strategy": "extension"}
     ]
   }],
   "capabilities": [
-    "audio.dsd",
-    "audio.dop",
-    "media.playback-queue",
-    "ui.navigator",
-    "audio.device-selection",
-    "audio.exclusive",
-    "ui.music-commands"
+    {"id": "session.seekable", "contractVersion": 1, "scope": "session"},
+    {"id": "media.playback-queue", "contractVersion": 1, "scope": "session"},
+    {"id": "audio.device-selection", "contractVersion": 1, "scope": "application"},
+    {"id": "ui.commands", "contractVersion": 1, "scope": "presentation"},
+    {"id": "ui.navigator", "contractVersion": 1, "scope": "presentation"}
   ]
 }
 ```
+
+上例反映当前可发布声明，而不是最终目标。只有对应播放闭环完成后，才能逐项加入 `dff`、`iso` 或普通音频匹配规则。`contentFamily: "audio"` 只告诉宿主把该格式归入统一音频列表和呈现层，不能替代每次播放时的 Provider Resolution。
 
 `.iso` 不能只按后缀接管。Hi-Fi 先进行轻量、有上限的头部与目录结构 sniff，确认存在有效 SACD 结构后才返回强匹配；普通磁盘 ISO 必须留给其他 Provider 或显示不支持。
 
@@ -272,22 +280,22 @@ singleFile(resource)
 └── 单个 SACD ISO
 
 fileCollection(resources)
-├── 多个 DSF / DFF
-└── 用户拖入或打开的一组普通/高级音频
+├── 兼容旧的多文件扩展 Session
+└── 不再用于宿主外部音频文件列表的日常播放
 
 restoredSession(extensionID, stateReference)
 └── 恢复 Provider、队列、当前项和播放位置
 ```
 
-SACD ISO 中的多个 Track 不扩展成 `fileCollection`；它们没有独立安全范围资源，属于 `singleFile(iso)` 建立后的容器内部队列。
+用户打开或拖入的一组普通/高级外部音频，首先形成宿主 `FileListState`，每次只把当前项作为 `singleFile` 请求交给 Resolver。SACD ISO 中的多个 Track 也不扩展成 `fileCollection`；它们没有独立安全范围资源，属于 `singleFile(iso)` 建立后的容器内部队列。
 
 ### 6.2 Session 状态
 
 ```text
 HiFiSessionState
 ├── sessionID
-├── sourceResources[]
-├── queueItems[]
+├── currentSourceResource
+├── containerItems[]?       # 仅 SACD 等虚拟 Track
 │   ├── stableID
 │   ├── sourceReference
 │   ├── containerTrackReference?
@@ -295,13 +303,13 @@ HiFiSessionState
 │   └── playable / failure state
 ├── currentItemID
 ├── playbackPosition / playbackState
-├── repeatMode / shuffleMode
+├── containerRepeatMode / shuffleMode?
 ├── selectedOutputDeviceID?
 ├── outputPolicy
 └── currentOutputStatus
 ```
 
-Core 只保存有 namespace、schema version 和大小限制的序列化状态引用。恢复时重新解析书签，重新验证文件身份与 Track 映射；不能持久化裸指针、sector offset 或进程相关句柄。
+Core 只保存有 namespace、schema version 和大小限制的序列化状态引用。外部文件列表顺序、当前 ID 和播放模式由宿主窗口状态持久化；插件恢复时重新解析当前资源书签，并在 SACD 场景重新验证 Track 映射。不能持久化裸指针、sector offset 或进程相关句柄。
 
 ### 6.3 稳定 ID
 
@@ -320,14 +328,15 @@ ID 在可恢复会话与当前内容版本内稳定，不包含用户可见标�
 
 ### 7.1 多文件音频
 
-Core 负责收集资源、去重、创建书签并构造 `fileCollection`。Hi-Fi Engine Session 将其解释为播放队列，并在会话生命周期内成组持有资源访问，向 Core 发布与现有音频列表一致的 Navigator 快照：
+Core 负责收集资源、分类、去重、创建书签并构造唯一的 `FileListState(kind: .audio)`：
 
-- activate：切换当前项；
-- remove：从会话队列移除，不删除磁盘文件；
-- move：调整播放顺序；
-- 上一项/下一项、播完续播、循环和随机作用于队列；
-- 当前项、badge、选中状态由插件更新后回传；
-- 插件不维护第二套可见列表 UI。
+- 普通音频和扩展声明 `contentFamily: audio` 的文件可混合追加；
+- activate、remove、move、上一项/下一项、播完续播、循环和随机全部作用于宿主列表；
+- 当前项、时长 badge、选中状态和播放动态图标由宿主更新；
+- activate 后 Resolver 对当前 URL 重新选择解码 Provider；
+- Hi-Fi Session 只持有当前 DSD 文件的授权和播放状态，关闭时必须停止 HAL 并释放设备。
+
+这样主题/UI 与扩展保持模块化：宿主拥有所有与格式无关的交互，Hi-Fi 只拥有格式、传输和设备专属能力。
 
 ### 7.2 SACD ISO 曲目
 
@@ -360,15 +369,14 @@ SACD Tracks
 
 ### 7.3 与当前 `FileListState` 的关系
 
-现有 `FileListState` 和 `FileListItem` 适合 Built-in Provider 的“一个项目对应一个外部文件”场景，也已支持 CUE 分段。Hi-Fi 不直接依赖这些 Core 内部 Swift 类型作为跨 Release ABI。
+现有 `FileListState` 和 `FileListItem` 是所有外部文件音频（Built-in 与 Hi-Fi）的宿主模型，也已支持 CUE 分段。Hi-Fi 不直接依赖这些 Core 内部 Swift 类型作为跨 Release ABI。
 
 ```text
-Built-in FileListState ─┐
-                       ├→ Navigator Host → 同一套列表 UI
-Hi-Fi Contribution ────┘
+Host FileListState（普通音频 + DSD 外部文件）→ Navigator Host → 同一套列表 UI
+Hi-Fi SACD Track contribution（未来）───────→ Navigator Host → 同一套列表 UI
 ```
 
-若以后抽取统一公共队列 contract，应增加 versioned 值类型并保持旧 Session 可解码，而不是把 `FileListCueInfo` 扩展成 SACD 专用数据结构。
+SACD 不能直接复用外部文件 URL 模型。应增加 versioned 虚拟媒体项 contract 并保持旧 Session 可解码，而不是把 `FileListCueInfo` 扩展成 SACD 专用数据结构。
 
 ### 7.4 增量更新
 
@@ -394,10 +402,10 @@ SACD Track 初次解析可以分阶段返回：
               └─────────────┬─────────────┘
                             │ commands / snapshots / events
                             │
-                  Hi-Fi Engine Service
+             Hi-Fi Runtime / Engine Service
               ┌─────────────┴─────────────┐
               │ HiFiSessionController     │
-              │ PlaybackQueue             │
+              │ Current source / Track set│
               │ Metadata / State          │
               └─────────────┬─────────────┘
                             │
@@ -428,10 +436,10 @@ SACD Track 初次解析可以分阶段返回：
 
 ## 9. 插件进程与实时音频边界
 
-高级解析器、DST decoder 和第三方 native code 处理不受信文件，Hi-Fi 应优先以独立 Engine Service 运行。实时输出必须有单一所有者：
+高级解析器、DST decoder 和第三方 native code 处理不受信文件，长期仍应评估独立 Engine Service。当前 `0.1.0` 为进程内动态 Runtime，但通过 `FoofoilExtensionKit` 的 C ABI 与 JSON 值消息隔离对象边界；实时输出必须有单一所有者：
 
 ```text
-Hi-Fi Engine Service
+Hi-Fi Runtime（当前 in-process；未来可迁移 Engine Service）
 ├── 文件读取与解码 worker
 ├── bounded ring buffer
 ├── CoreAudio HAL device ownership
@@ -441,9 +449,9 @@ foofoil Core
 └── 只收发控制命令与低频状态，不搬运实时音频帧
 ```
 
-不通过普通 XPC 消息逐 buffer 把 DoP 或高采样率 PCM 送回 Core，因为 IPC jitter、复制和背压会破坏实时性。Engine Service 拥有从 decoder 到 HAL 的完整链路。
+不通过普通 XPC 消息逐 buffer 把 DoP 或高采样率 PCM 送回 Core，因为 IPC jitter、复制和背压会破坏实时性。Hi-Fi Runtime 拥有从 decoder 到 HAL 的完整链路。
 
-Phase 0 必须验证：
+当前进程内 Phase 0 已验证动态插件、文件授权、HAL/DoP 与会话命令链路。迁移 Engine Service 前仍必须验证：
 
 - 扩展服务能否可靠枚举和打开 CoreAudio 设备；
 - 安全范围文件授权能否在服务中正确建立和回收；
@@ -451,7 +459,7 @@ Phase 0 必须验证：
 - 服务崩溃后 Core 能否显示失败并重新建立 Session；
 - 签名、sandbox/entitlement 和发布结构是否符合扩展系统约束。
 
-若部署限制迫使第一版进程内运行，也保持相同的可序列化协议边界，为迁移服务保留路径。
+第一版已经选择进程内运行以先闭合真实硬件链路。不得让该实现反向污染宿主：Core 仍只依赖可序列化 contract，不持有 decoder、文件句柄或 HAL 对象，为后续服务迁移保留路径。
 
 ---
 
@@ -592,7 +600,7 @@ Decoder A ──┐
 Decoder B ──┘
 ```
 
-下一项提前 prepare。相邻项目的 sample rate、channel layout 和输出模式一致时复用设备链路；不一致时受控重配置并明确 gapless 不可保证。SACD Track 和多文件列表共用这一调度机制。
+SACD 容器 Track 可在下一项前提前 prepare。外部文件列表当前按项目关闭旧 Session、释放 HAL/Hog/设备格式，再路由并启动下一 Provider；尚不承诺跨 Provider gapless。未来相邻项目的 sample rate、channel layout、Provider 和输出模式一致时，可在不改变宿主列表所有权的前提下增加受控链路复用。
 
 ---
 
@@ -611,7 +619,7 @@ Decoder B ──┘
 
 覆盖设备拔出、默认设备改变、设备被占用、sleep/wake、Engine Service 崩溃、foofoil 退出、插件禁用/升级和多窗口竞争。
 
-第一版由 Hi-Fi 的 application-scope audio service 串行协调设备独占。多个窗口可以各自有队列，但同一时刻只能有一个拥有独占输出；切换活动播放会话时显式停止或暂停前一会话。
+当前 Runtime 内只有一个进程级 `HALDSFPlaybackEngine`，通过 `playingSessionID` 仲裁多个窗口会话；同一时刻只能有一个会话拥有独占输出。切换或关闭会话时显式 stop、销毁 IOProc、恢复 physical/virtual format 并释放 Hog Mode。宿主在启动新的原生/扩展播放器前等待 `hifi.close` 完成，避免 DAC 尚未释放时抢先播放。迁移服务后仍保持相同语义。
 
 ---
 
@@ -668,7 +676,7 @@ idle → openingSource → readingMetadata / indexing
 
 - 未安装 Hi-Fi 时的安装提示及安装后继续打开；
 - 普通音频 Built-in / Hi-Fi 偏好与失败回退；
-- `singleFile`、`fileCollection`、restored session；
+- 当前外部文件的 `singleFile`、兼容 `fileCollection`、restored session；
 - 书签建立、恢复、失效与释放；
 - Navigator revision、activate/remove/move 与非法动作拒绝；
 - SACD Track 只开放允许动作；
@@ -706,29 +714,29 @@ SMSL D6s 可作为参考设备，但不得硬编码名称或厂商 ID。
 
 ```text
 ContentRequest
-→ Hi-Fi Engine Service
-→ DSF / raw DFF / DST DFF
-→ DSDStream
-→ DoP DAC 或 PCM Mac Speakers
+→ Hi-Fi in-process Runtime（稳定 C ABI / JSON 边界）
+→ Stereo raw DSF
+→ DSFRawStream / DoP timeline
+→ CoreAudio HAL / DoP DAC
 → Session 状态回传
 ```
 
-同时构造静态 Track 队列，通过真实 `NavigatorContribution` 在现有列表面板中完成 activate、当前项更新和上一首/下一首。
+同时验证宿主统一音频列表：普通音频和 DSF 使用同一 `FileListState` / `NavigatorContribution`，每次选择后再路由解码器。Runtime 的旧 `fileCollection` 队列保留兼容，但不是外部文件列表的主路径。
 
-验收：
+截至 2026-09-03 的验收结果：
 
-1. Provider 可安装、匹配并建立 Session；
-2. Engine Service 部署、文件授权和 HAL 访问成立；
-3. DSF、raw DFF、DST DFF 可稳定读取；
-4. 参考 DAC 正确识别 DSD64/128；
-5. 内置输出自动降级 PCM；
-6. 列表复用链路成立，没有插件自定义列表 UI；
-7. Service 异常退出后释放或恢复设备；
-8. 完成候选依赖许可证和体积报告。
+1. Provider 可由 Debug bundle 装载、匹配 `.dsf` 并建立 Session；
+2. 进程内 Runtime 的文件授权、HAL 访问和 C ABI 消息链路成立；
+3. Stereo raw DSF 可稳定读取、播放、暂停和 Seek；
+4. 参考 SMSL DAC 已正确识别并播放 DSD64；DSD128/256 尚待真实硬件回归；
+5. 普通音频与 DSF 的统一列表、拖拽排序、动态图标、键盘/媒体键和播放模式已成立；
+6. 封面、metadata 外壳、播放控件和技术信息复用宿主 UI，没有插件自定义列表；
+7. 关闭 Session 会恢复设备格式并释放 Hog Mode；切换 Provider 前宿主等待释放完成；
+8. DFF、DST、PCM fallback、Engine Service 与正式 Release 安装仍属后续工作。
 
 ### Phase 1：DSF / DFF 可发布版本
 
-完成 Reader、metadata、DST、DoP、PCM fallback、HAL、Seek、设备切换、多文件队列、Session 恢复、设置与本地化。
+在现有 DSF/DoP 闭环上完成 DSD128/256 回归、raw DFF Reader、DST、PCM fallback、设备变化恢复、DSF/DFF 专项 metadata、Session 恢复、设置、本地化和正式插件安装。外部多文件顺序继续由宿主列表负责，不在 Hi-Fi 内重建一套队列。
 
 验收：用户双击、拖入或批量打开 DSF/DFF 时，行为与 foofoil 其他内容一致；列表、菜单和快捷键使用宿主能力；未安装插件时能从应用内安装并继续打开。
 
@@ -750,18 +758,19 @@ ContentRequest
 |---|---|
 | 产品形态 | 第一方可选 Hi-Fi 插件 |
 | Core 体积 | 不携带高级 codec/parser/HAL 实现 |
-| 普通音频 | Built-in 保留；Hi-Fi 可按偏好 override |
+| 普通音频 | 当前由 Built-in 播放；未来可按偏好由 Hi-Fi override |
 | DSF / DFF | Phase 1 |
 | DFF DST | 与 DFF 同阶段，复用到 SACD |
 | SACD ISO | Phase 2，先 Stereo Area |
 | `.iso` 匹配 | 必须 content sniffing |
 | SACD Track | 同一资源/Session 内的逻辑队列项 |
-| 列表 UI | 复用 foofoil Navigator Host |
-| 队列语义 | Hi-Fi 的 `media.playback-queue` |
-| 列表数据 | versioned `ui.navigator` contribution |
+| 外部音频列表 UI/语义 | foofoil `FileListState` + Navigator Host，混合普通音频与扩展音频 |
+| 外部项目解码 | activate 后按 URL 重新执行 Provider Resolution |
+| SACD Track 语义 | Hi-Fi 维护，使用 versioned 虚拟媒体项 / `media.playback-queue` |
+| SACD Track 列表数据 | versioned `ui.navigator` contribution |
 | 插件 UI | 不自绘播放列表；命令和状态由宿主呈现 |
 | DSD 输出 | DoP 优先 |
-| DoP 输出 | Hi-Fi Engine Service 内 CoreAudio HAL |
+| DoP 输出 | 当前 Hi-Fi in-process Runtime 内 CoreAudio HAL；保留迁移 Service 的协议边界 |
 | DoP 不可用 | 自动 DSD → PCM |
 | Exclusive | DoP 时尽量 Hog Mode，失败可降级 |
 | ISO 播放 | 流式，不生成临时 DSF |
@@ -775,7 +784,7 @@ ContentRequest
 
 ### 20.1 扩展服务与 HAL 的部署可行性
 
-签名、sandbox、entitlement、XPC 生命周期和安全范围授权可能限制独立服务直接管理设备。这是 Phase 0 的阻断性验证项。
+当前进程内 Runtime 已绕开独立服务部署阻断并完成真实播放。签名、sandbox、entitlement、XPC 生命周期和安全范围授权仍可能限制未来 Engine Service 直接管理设备，因此服务迁移必须单独做部署与异常恢复 Spike，不能作为已经完成的能力描述。
 
 ### 20.2 CoreAudio 不自动等于 bit-perfect
 
@@ -787,7 +796,7 @@ ContentRequest
 
 ### 20.4 多窗口与独占设备冲突
 
-播放 Session 属于窗口，物理设备独占属于应用范围。必须有 Hi-Fi application service 仲裁，不能让每个窗口独立取得 Hog Mode。
+播放 Session 属于窗口，物理设备独占属于应用范围。当前由进程级单例引擎仲裁；迁移服务后由 application-scope audio service 接管。不能让每个窗口各自创建不受协调的 HAL 引擎并独立取得 Hog Mode。
 
 ### 20.5 软件音量与 DoP 冲突
 
@@ -801,26 +810,20 @@ Hi-Fi 与 foofoil 独立发版。队列、Track ID 和设置状态需要 schema 
 
 ## 21. 建议下一步
 
-先完成两个相互打通的 Spike：
+Phase 0 的 DSF/DoP 与统一列表 Spike 已打通。下一步按风险排序：
 
-```text
-Spike A：扩展与列表
-安装 Hi-Fi → 建立测试 Session
-→ 发布 playback queue / navigator
-→ 使用 foofoil 现有列表完成选择与状态同步
-
-Spike B：实时音频
-DSF / raw DFF / DST DFF → DSDStream
-→ Engine Service → DoP DAC 或 PCM fallback
-```
-
-合并后验证“列表选择下一项 → 插件切换源 → 保持/重建输出链路 → Core 更新当前项”的完整闭环。闭环成立后进入 DSF/DFF 产品化；SACD ISO 只新增容器、Area、Track 与索引层，并接入已验证的队列、Navigator、DST、DSDStream 和输出管线。
+1. 用真实 DAC 回归 DSD → 普通音频、DSD → DSD、暂停/恢复、长时播放、拔插和设备被占用；
+2. 完成 DSD128/256 硬件矩阵及结构化设备错误；
+3. 实现 raw DFF source，并复用现有 DoP/HAL 管线；
+4. 实现 DSD → PCM fallback 与 Automatic / Prefer DoP / Always PCM 策略；
+5. 再加入 DST、专项 metadata、Session 恢复和正式发布流程；
+6. SACD ISO 开工前先定义宿主可持久化的虚拟媒体项 contract，避免退回“一 Track 一假 URL”或插件自绘列表。
 
 ---
 
 ## 22. 参考
 
-- foofoil 扩展系统实施方案：`foofoil/docs/foofoil_Extension_System_Implementation_Plan.md`
+- foofoil 扩展系统实施方案：`../../foofoil/foofoil/docs/foofoil_Extension_System_Implementation_Plan.md`
 - SFBAudioEngine：https://github.com/sbooth/SFBAudioEngine
 - sacd_extract / sacd-ripper：https://github.com/jmmaloney4/sacd-extract
 - Apple Core Audio / Audio Hardware Services 文档
