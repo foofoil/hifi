@@ -16,6 +16,7 @@
       "role": "override",
       "fallbackProvider": "builtin.audio",
       "enhancementDomain": "audio",
+      "contentFamily": "audio",
       "contentTypes": [
         {"extensions": ["dsf"], "strategy": "extension"}
       ]

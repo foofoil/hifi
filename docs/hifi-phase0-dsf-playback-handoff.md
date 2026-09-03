@@ -37,7 +37,7 @@ DSF 文件
 - DSD → PCM fallback；
 - raw DFF 或 DST DFF 的实际播放；
 - DSD128 / DSD256 的真实硬件回归；
-- 队列 remove、追加文件及循环/随机模式；
+- SACD 虚拟 Track 的宿主媒体项契约；
 - SACD ISO；
 - DSF 内嵌 metadata 的专项解析和正式 Session 恢复；宿主侧同目录封面与通用 metadata 加载已接入；
 - Release 插件安装/升级体验；
@@ -188,11 +188,11 @@ swift run hifi-inspect --stream-check '/path/to/file.dsf'
 
 不要提前恢复 capability：不能让 DFF/ISO 被选中后只在播放时才暴露 `unsupportedSource`，也不能报告 `isSeekable = true` 却没有带位置参数的 seek 命令。
 
-### 7.2 列表基础闭环已接通
+### 7.2 音频列表由宿主统一持有
 
-多个 DSF 已可通过 `fileCollection` 建立 `PlaybackQueueSnapshot` 与 `NavigatorContribution`，支持上一项、下一项、Navigator activate、拖拽重排和播完续播。当前项复用宿主普通音频列表的播放动态图标；重排后按稳定资源 ID 解析封面与播放资源，不依赖列表位置。当前仍缺 remove、向既有会话追加文件、循环/随机模式与正式恢复。
+普通音频与 DSD 文件统一进入宿主 `FileListState(kind: .audio)`，使用同一个 `builtin.file-list` Navigator。拖入、追加、删除、拖拽重排、当前项动态图标、上一项/下一项、循环、随机和键盘操作均由 foofoil 实现一次；选中项目时宿主再通过 provider resolver 决定使用 AVFoundation 还是 Hi-Fi provider。Hi-Fi 的单曲会话只负责当前 DSD 项的解码、传输、seek 和设备状态，不拥有 UI 列表顺序。
 
-实现时应使用现有 `PlaybackQueueSnapshot` 与 `NavigatorContribution`，不要在插件中自绘列表，也不要把 SACD Track 伪装成临时外部文件。
+扩展通过清单中的 `contentFamily: "audio"` 声明其格式应归入宿主音频呈现家族，宿主不硬编码 `.dsf`。Runtime 仍保留 `fileCollection`/queue 契约作为兼容及未来虚拟 Track 能力的基础，但 DSF 文件列表不再走这条路径。SACD Track 后续应通过正式的虚拟媒体项契约接入宿主队列，不生成临时 DSF，也不在插件中自绘第二套列表。
 
 ### 7.3 Underrun 与 marker continuity
 
@@ -216,7 +216,7 @@ DoP 链路不能应用软件音量。Hi-Fi 已复用通用播放条，但通过 
 建议先把“一个 DSF 正常播放”的结果加固，再扩大格式范围：
 
 1. **播放稳定性**：共享 marker timeline、underrun 诊断、设备断开/占用错误、长时间播放和暂停恢复。
-2. **现有列表接入（基础闭环已完成）**：多个 DSF 形成 `PlaybackQueueSnapshot` 和 `NavigatorContribution`；上一项、下一项、选择项、拖拽重排、自动续播、当前项同步及播放动态图标已接通。后续补 remove/append、循环与随机。
+2. **统一音频列表（基础闭环已完成）**：普通音频与 DSF 共用宿主 `FileListState` 和 `builtin.file-list`；已有拖入/追加、删除、拖拽重排、上一项/下一项、循环/随机、自动续播、当前项同步及播放动态图标。后续补虚拟 SACD Track 的宿主媒体项契约。
 3. **raw DFF 播放**：实现 DFF source 并复用现有 `DSDStream → DoP → HAL` 管线。
 4. **PCM fallback**：内置扬声器、蓝牙和不支持目标 carrier 的设备必须可播放；再实现 Automatic / Prefer DoP / Always PCM 策略。
 5. **metadata、封面、设置与 Session 恢复**：宿主通用封面/元数据呈现已复用；后续补 DSF 内嵌 metadata 专项解析、设置和恢复。
