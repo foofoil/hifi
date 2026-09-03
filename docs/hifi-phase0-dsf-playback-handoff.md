@@ -26,7 +26,7 @@ DSF 文件
 - 声道：Stereo；
 - 已实测采样率：DSD64 / 2.8224 MHz；
 - 输出：DoP，经 CoreAudio HAL 独占 USB DAC；
-- 宿主能力：打开文件、播放、暂停、进度轮询、拖动 Seek、结束后从头重播、输出设备选择；多个 DSF 可形成队列，通过 Navigator、上一项/下一项切换并自动续播；
+- 宿主能力：打开文件、播放、暂停、进度轮询、拖动 Seek、结束后从头重播、输出设备选择；多个 DSF 可形成队列，通过 Navigator、上一项/下一项切换并自动续播；Hi-Fi 已接入宿主通用音频呈现层，复用封面/元数据加载、播放条、底部进度线、hover 显隐、空格键和系统媒体键；
 - 生命周期：暂停、切换设备、关闭/替换箔片时停止 IO、恢复设备格式并释放 Hog Mode；
 - 安全范围：插件会话存活期间持有文件 bookmark 对应的 security-scoped access。
 - 稳定性：HAL 输出时间线会统一重写 DoP marker；即使发生奇数帧 underrun，静音后的音频也不会沿用 producer 的旧 marker 相位；
@@ -37,9 +37,9 @@ DSF 文件
 - DSD → PCM fallback；
 - raw DFF 或 DST DFF 的实际播放；
 - DSD128 / DSD256 的真实硬件回归；
-- 队列 remove/move、追加文件及循环/随机模式；
+- 队列 remove、追加文件及循环/随机模式；
 - SACD ISO；
-- metadata、封面和正式 Session 恢复；
+- DSF 内嵌 metadata 的专项解析和正式 Session 恢复；宿主侧同目录封面与通用 metadata 加载已接入；
 - Release 插件安装/升级体验；
 - 独立 Engine Service/XPC 隔离。当前为了验证边界，播放引擎仍在 in-process 插件中。
 
@@ -120,7 +120,9 @@ DoP silence 使用 payload `0x69, 0x69`，marker 仍须连续交替。任何 und
 - `foofoil/ExtensionKit/MediaPlaybackContracts.swift`：播放、队列、设备选择的值类型契约和校验。
 - `foofoil/ExtensionKit/ExtensionLoader.swift`：签名校验、动态库入口和 Runtime 调用。
 - `foofoil/ExtensionKit/ExtensionHost.swift`：Debug bundle 加载、provider 路由、命令和 close 生命周期。
-- `foofoil/ExtensionKit/ExtensionPresentationView.swift`：箔片内播放/暂停、进度、设备状态和错误提示。
+- `foofoil/ExtensionKit/ExtensionPresentationView.swift`：按 provider 路由通用扩展呈现或 Hi-Fi 音频呈现。
+- `foofoil/ExtensionKit/ExtensionAudioModeView.swift`：把扩展播放快照/命令适配到宿主媒体控制协议，并接入空格键与系统媒体键。
+- `foofoil/Views/AudioPresentationView.swift`：内置音频与 Hi-Fi 共用的封面、元数据、播放条和底部进度线。
 - `foofoil/AppState/AppState+ContentOpen.swift`：DSF 路由至扩展、命令执行及 status 非持久化轮询。
 - `foofoil/AppState/AppState.swift`：扩展会话 retain/release/close。
 - `foofoil/App/AppDelegate+MenuSetup.swift`：Hi-Fi 输出设备层级菜单。
@@ -188,7 +190,7 @@ swift run hifi-inspect --stream-check '/path/to/file.dsf'
 
 ### 7.2 列表基础闭环已接通
 
-多个 DSF 已可通过 `fileCollection` 建立 `PlaybackQueueSnapshot` 与 `NavigatorContribution`，支持上一项、下一项、Navigator activate 和播完续播。当前仍缺 remove/move、向既有会话追加文件、循环/随机模式与正式恢复。
+多个 DSF 已可通过 `fileCollection` 建立 `PlaybackQueueSnapshot` 与 `NavigatorContribution`，支持上一项、下一项、Navigator activate、拖拽重排和播完续播。当前项复用宿主普通音频列表的播放动态图标；重排后按稳定资源 ID 解析封面与播放资源，不依赖列表位置。当前仍缺 remove、向既有会话追加文件、循环/随机模式与正式恢复。
 
 实现时应使用现有 `PlaybackQueueSnapshot` 与 `NavigatorContribution`，不要在插件中自绘列表，也不要把 SACD Track 伪装成临时外部文件。
 
@@ -207,17 +209,17 @@ UI 当前只显示本地化的通用“Hi-Fi 播放失败”。Runtime 内部保
 
 ### 7.5 DoP 固定音量
 
-DoP 链路不能应用软件音量。当前没有为 Hi-Fi 单独显示 Fixed Volume，也没有硬件音量能力路由。后续实现时不得为了复用普通音频音量滑块而改写 DoP sample。
+DoP 链路不能应用软件音量。Hi-Fi 已复用通用播放条，但通过 transport capability 隐藏软件音量控件；尚未实现硬件音量能力路由。后续实现时不得为了显示普通音频音量滑块而改写 DoP sample。
 
 ## 8. 建议的下一阶段顺序
 
 建议先把“一个 DSF 正常播放”的结果加固，再扩大格式范围：
 
 1. **播放稳定性**：共享 marker timeline、underrun 诊断、设备断开/占用错误、长时间播放和暂停恢复。
-2. **现有列表接入**：多个 DSF/DFF 形成 `PlaybackQueueSnapshot` 和 `NavigatorContribution`；实现上一项、下一项、选择项和当前项同步。
+2. **现有列表接入（基础闭环已完成）**：多个 DSF 形成 `PlaybackQueueSnapshot` 和 `NavigatorContribution`；上一项、下一项、选择项、拖拽重排、自动续播、当前项同步及播放动态图标已接通。后续补 remove/append、循环与随机。
 3. **raw DFF 播放**：实现 DFF source 并复用现有 `DSDStream → DoP → HAL` 管线。
 4. **PCM fallback**：内置扬声器、蓝牙和不支持目标 carrier 的设备必须可播放；再实现 Automatic / Prefer DoP / Always PCM 策略。
-5. **metadata、封面、设置与 Session 恢复**。
+5. **metadata、封面、设置与 Session 恢复**：宿主通用封面/元数据呈现已复用；后续补 DSF 内嵌 metadata 专项解析、设置和恢复。
 6. **DST 与 SACD ISO**：按主技术方案接入同一 queue/navigator，不生成临时 DSF。
 7. **服务隔离和发布**：评估将 application-scope audio service 移至独立 Engine Service/XPC，并完成正式插件安装、升级与签名流程。
 

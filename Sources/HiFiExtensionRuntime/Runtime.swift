@@ -265,7 +265,11 @@ private func makeSession(
     return result
 }
 
-private func queueObject(sources: [RuntimeSource], currentID: String) -> [String: Any] {
+private func queueObject(
+    sources: [RuntimeSource],
+    currentID: String,
+    revision: UInt64 = 0
+) -> [String: Any] {
     let items: [[String: Any]] = sources.map {
         var item: [String: Any] = ["id": $0.id, "title": $0.url.lastPathComponent,
             "symbolName": "waveform", "isPlayable": true]
@@ -273,15 +277,38 @@ private func queueObject(sources: [RuntimeSource], currentID: String) -> [String
         return item
     }
     return ["contractVersion": 1, "items": items,
-     "currentItemID": currentID, "repeatMode": "off", "isShuffled": false, "revision": 0]
+     "currentItemID": currentID, "repeatMode": "off", "isShuffled": false, "revision": revision]
 }
 
-private func navigatorObject(sources: [RuntimeSource], currentID: String) -> [String: Any] {
+private func navigatorObject(
+    sources: [RuntimeSource],
+    currentID: String,
+    revision: UInt64 = 0
+) -> [String: Any] {
     ["id": "hifi.playback-queue", "contractVersion": 1, "titleLocalizationKey": "Hi-Fi Audio",
      "style": "flat", "selectionMode": "single", "items": sources.map {
-        ["id": $0.id, "title": $0.url.lastPathComponent, "symbolName": "waveform",
-         "isEnabled": true, "isCurrent": $0.id == currentID]
-     }, "selectedItemIDs": [currentID], "allowedActions": ["activate"], "revision": 0]
+        var item: [String: Any] = [
+            "id": $0.id,
+            "title": $0.url.lastPathComponent,
+            "symbolName": "waveform",
+            "isEnabled": true,
+            "isCurrent": $0.id == currentID
+        ]
+        if let duration = $0.descriptor.duration {
+            item["badge"] = formatDuration(duration)
+        }
+        return item
+     }, "selectedItemIDs": [currentID], "allowedActions": ["activate", "move"], "revision": revision]
+}
+
+private func formatDuration(_ seconds: TimeInterval) -> String {
+    let total = max(0, Int(seconds.rounded()))
+    let hours = total / 3_600
+    let minutes = (total % 3_600) / 60
+    let remainder = total % 60
+    return hours > 0
+        ? String(format: "%d:%02d:%02d", hours, minutes, remainder)
+        : String(format: "%d:%02d", minutes, remainder)
 }
 
 private final class HiFiRuntimeController: @unchecked Sendable {
@@ -398,6 +425,15 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 targetID = record.sources.indices.contains(next) ? record.sources[next].id : nil
             }
             if let targetID { switchItem(to: targetID, record: record) }
+        case "hifi.navigator.move":
+            guard let contribution = (session["navigatorContributions"] as? [[String: Any]])?.first,
+                  let items = contribution["items"] as? [[String: Any]] else {
+                throw RuntimeControllerError.invalidQueueOrder
+            }
+            try reorderSources(
+                using: items.compactMap { $0["id"] as? String },
+                record: record
+            )
         case "hifi.close":
             close(record)
         default:
@@ -491,6 +527,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         lock.unlock()
         if wasPlaying { _ = try? player.stop() }
         record.currentIndex = index
+        record.queueRevision &+= 1
         record.samplePosition = 0
         record.underrunCount = 0
         record.failureDescription = nil
@@ -507,11 +544,37 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
     }
 
+    private func reorderSources(using orderedIDs: [String], record: RuntimeSession) throws {
+        guard orderedIDs.count == record.sources.count,
+              Set(orderedIDs).count == orderedIDs.count else {
+            throw RuntimeControllerError.invalidQueueOrder
+        }
+        let sourcesByID = Dictionary(uniqueKeysWithValues: record.sources.map { ($0.id, $0) })
+        guard orderedIDs.allSatisfy({ sourcesByID[$0] != nil }) else {
+            throw RuntimeControllerError.invalidQueueOrder
+        }
+        let currentID = record.sources[record.currentIndex].id
+        let reordered = orderedIDs.compactMap { sourcesByID[$0] }
+        guard reordered.map(\.id) != record.sources.map(\.id),
+              let currentIndex = reordered.firstIndex(where: { $0.id == currentID }) else { return }
+        record.sources = reordered
+        record.currentIndex = currentIndex
+        record.queueRevision &+= 1
+    }
+
     private func updateQueueState(for record: RuntimeSession, session: inout [String: Any]) {
         guard record.sources.count > 1 else { return }
         let currentID = record.sources[record.currentIndex].id
-        session["playbackQueue"] = queueObject(sources: record.sources, currentID: currentID)
-        session["navigatorContributions"] = [navigatorObject(sources: record.sources, currentID: currentID)]
+        session["playbackQueue"] = queueObject(
+            sources: record.sources,
+            currentID: currentID,
+            revision: record.queueRevision
+        )
+        session["navigatorContributions"] = [navigatorObject(
+            sources: record.sources,
+            currentID: currentID,
+            revision: record.queueRevision
+        )]
         if var presentation = session["presentation"] as? [String: Any] {
             presentation["body"] = record.url.lastPathComponent
             session["presentation"] = presentation
@@ -578,8 +641,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
 
 private final class RuntimeSession {
     let id: UUID
-    let sources: [RuntimeSource]
+    var sources: [RuntimeSource]
     var currentIndex = 0
+    var queueRevision: UInt64 = 0
     var url: URL { sources[currentIndex].url }
     var sampleRate: Int { sources[currentIndex].descriptor.sampleRate }
     var sampleCount: UInt64 { sources[currentIndex].descriptor.sampleCount ?? 0 }
@@ -641,5 +705,6 @@ private enum RuntimeControllerError: Error {
     case invalidSession
     case noOutputDevice
     case invalidPlaybackPosition
+    case invalidQueueOrder
     case invalidSource
 }

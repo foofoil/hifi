@@ -47,6 +47,31 @@ do {
           let releaseBytes = interface.pointee.releaseBytes else {
         throw SmokeError.invalidInterface
     }
+    func perform(_ commandID: String, session: [String: Any]) throws -> [String: Any] {
+        guard let performCommand = interface.pointee.performCommand else {
+            throw SmokeError.invalidInterface
+        }
+        let message = try JSONSerialization.data(withJSONObject: [
+            "commandID": commandID,
+            "session": session
+        ])
+        var commandResponse: UnsafeMutablePointer<UInt8>?
+        var commandResponseLength = 0
+        let commandStatus = message.withUnsafeBytes { bytes in
+            performCommand(
+                interface.pointee.context,
+                bytes.bindMemory(to: UInt8.self).baseAddress,
+                bytes.count,
+                &commandResponse,
+                &commandResponseLength
+            )
+        }
+        guard commandStatus == 0, let commandResponse else { throw SmokeError.callFailed(commandStatus) }
+        defer { releaseBytes(interface.pointee.context, commandResponse, commandResponseLength) }
+        return try JSONSerialization.jsonObject(
+            with: Data(bytes: commandResponse, count: commandResponseLength)
+        ) as! [String: Any]
+    }
     let requestData = try JSONSerialization.data(withJSONObject: request)
     var response: UnsafeMutablePointer<UInt8>?
     var responseLength = 0
@@ -69,27 +94,29 @@ do {
         throw SmokeError.invalidSession
     }
     var finalSession = session
-    if isSelfTest, let performCommand = interface.pointee.performCommand {
+    if isSelfTest {
         var requested = session
         var contributions = requested["navigatorContributions"] as! [[String: Any]]
         contributions[0]["selectedItemIDs"] = ["file:1"]
         requested["navigatorContributions"] = contributions
-        let message = try JSONSerialization.data(withJSONObject: [
-            "commandID": "hifi.navigator.activate",
-            "session": requested
-        ])
-        var commandResponse: UnsafeMutablePointer<UInt8>?
-        var commandResponseLength = 0
-        let commandStatus = message.withUnsafeBytes { bytes in
-            performCommand(interface.pointee.context, bytes.bindMemory(to: UInt8.self).baseAddress,
-                bytes.count, &commandResponse, &commandResponseLength)
-        }
-        guard commandStatus == 0, let commandResponse else { throw SmokeError.callFailed(commandStatus) }
-        defer { releaseBytes(interface.pointee.context, commandResponse, commandResponseLength) }
-        finalSession = try JSONSerialization.jsonObject(
-            with: Data(bytes: commandResponse, count: commandResponseLength)
-        ) as! [String: Any]
+        finalSession = try perform("hifi.navigator.activate", session: requested)
         guard (finalSession["playbackQueue"] as? [String: Any])?["currentItemID"] as? String == "file:1" else {
+            throw SmokeError.invalidSession
+        }
+
+        requested = finalSession
+        contributions = requested["navigatorContributions"] as! [[String: Any]]
+        var items = contributions[0]["items"] as! [[String: Any]]
+        items.swapAt(0, 1)
+        contributions[0]["items"] = items
+        requested["navigatorContributions"] = contributions
+        finalSession = try perform("hifi.navigator.move", session: requested)
+        let reorderedIDs = ((finalSession["playbackQueue"] as? [String: Any])?["items"] as? [[String: Any]])?
+            .compactMap { $0["id"] as? String }
+        guard reorderedIDs == ["file:1", "file:0"],
+              (finalSession["playbackQueue"] as? [String: Any])?["currentItemID"] as? String == "file:1",
+              ((finalSession["navigatorContributions"] as? [[String: Any]])?.first?["allowedActions"] as? [String])?
+                .contains("move") == true else {
             throw SmokeError.invalidSession
         }
     }
