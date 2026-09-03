@@ -237,9 +237,9 @@ HAL callback 禁止文件 I/O、锁、内存分配、JSON、日志或 Swift coll
 
 截至本文更新时：
 
-- `hifi`：raw DFF、5.0 输出布局、设备恢复、未压缩立体声 SACD ISO 出流与本文一并提交；
-- `extension-kit`：`MediaPlaybackQueueSnapshot.title` 供容器专辑标题使用；旧 queue JSON 仍可解码；
-- `foofoil` 已提交 DAC 释放屏障 `666e149`、切歌播放意图 `4f5ae49` 与 seek-on-release `0f77844`；ISO sniff、CUE 式曲目列表（曲名 + 左侧序号）与 Session 复用与本次改动一并提交；
+- `hifi` `9b09bce`：raw DFF、5.0 输出布局、设备恢复、未压缩立体声 SACD ISO 出流；
+- `extension-kit` `1c3c923`：`MediaPlaybackQueueSnapshot.title` 供容器专辑标题使用；旧 queue JSON 仍可解码；
+- `foofoil` 已提交 DAC 释放屏障 `666e149`、切歌播放意图 `4f5ae49` 与 seek-on-release `0f77844`；ISO sniff、CUE 式曲目列表（曲名 + 左侧序号）与 Session 复用见 `9782820`；
 - 第 4.1 节切换手测已通过；第 4.3 节立体声 DFF 与 5.0 折混已通过；第 4.4 节 SACD ISO 列表/Seek/出声已通过；第 4.2 节设备恢复手测尚未做；SACD 自然续播刚修，待再听两曲；
 - 核心测试以 `swift test` 为准；本地 ISO 存在时 `SACDISOParserTests` 会对照同专辑 DSF 前 16384 字节。
 
