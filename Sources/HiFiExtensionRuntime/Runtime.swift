@@ -679,6 +679,18 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
         let isPlaying = playingSessionID == record.id && status.state == .playing
         lock.unlock()
+        var reconnectedDevice: HiFiAudioOutputDevice?
+        if record.playbackState == "failed",
+           record.failureDescription == HiFiPlaybackError.deviceDisconnected.localizationKey,
+           let selectedDeviceID = record.selectedDeviceID {
+            reconnectedDevice = try? CoreAudioDeviceCatalog.outputDevices().first {
+                $0.id == selectedDeviceID && $0.isConnected
+            }
+            if reconnectedDevice != nil {
+                record.playbackState = "paused"
+                record.failureDescription = nil
+            }
+        }
         let position = TimeInterval(record.samplePosition) / TimeInterval(record.sampleRate)
         if var playback = session["mediaPlayback"] as? [String: Any] {
             playback["state"] = record.playbackState
@@ -700,6 +712,8 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                     outputChannels: Int(status.outputChannelCount),
                     deviceName: device["displayName"] as? String ?? deviceID
                 )
+            } else if let reconnectedDevice {
+                selection["statusDescription"] = reconnectedDevice.displayName
             }
             session["audioDeviceSelection"] = selection
         }

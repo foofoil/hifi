@@ -16,6 +16,17 @@ public struct HALDSFPlaybackStatus: Codable, Equatable, Sendable {
     public let underrunCount: UInt64
     public let outputChannelCount: Int
     public let failureDescription: String?
+
+    func stoppedClearingFailure() -> Self {
+        Self(
+            state: .stopped,
+            samplePosition: samplePosition,
+            sampleCount: sampleCount,
+            underrunCount: underrunCount,
+            outputChannelCount: outputChannelCount,
+            failureDescription: nil
+        )
+    }
 }
 
 public enum HALDSFPlaybackError: Error, Equatable, Sendable {
@@ -142,7 +153,12 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
 
     @discardableResult
     public func stop() throws -> HALDSFPlaybackStatus {
-        let status = teardown(expectedSession: nil, failure: nil, stateIfClean: .stopped)
+        let status = teardown(
+            expectedSession: nil,
+            failure: nil,
+            stateIfClean: .stopped,
+            resetInactiveFailure: true
+        )
         if status.state == .failed {
             throw HiFiPlaybackError(localizationKey: status.failureDescription ?? "")
                 ?? HiFiPlaybackError.outputInitializationFailure
@@ -182,22 +198,29 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
     private func teardown(
         expectedSession: PlaybackSession?,
         failure: Error?,
-        stateIfClean: HALDSFPlaybackState
+        stateIfClean: HALDSFPlaybackState,
+        resetInactiveFailure: Bool = false
     ) -> HALDSFPlaybackStatus {
         lock.lock()
         if let expectedSession, activeSession !== expectedSession {
             lock.unlock()
             return status()
         }
-        let session = activeSession
+        guard let session = activeSession else {
+            if resetInactiveFailure {
+                // 拔出设备后的失败属于已结束会话；显式 stop 必须可重入，下一次 play 才能重新探测同一 UID。
+                lastStatus = lastStatus.stoppedClearingFailure()
+            }
+            let status = lastStatus
+            lock.unlock()
+            return status
+        }
         activeSession = nil
         let watch = deviceWatch
         deviceWatch = nil
         lock.unlock()
 
         watch?.stop()
-        guard let session else { return status() }
-
         session.requestStop()
         let cleanupError = session.stopIOAndRestore()
         let finalError = failure ?? cleanupError

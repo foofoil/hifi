@@ -43,4 +43,24 @@ struct HiFiPlaybackErrorTests {
         }
         #expect(!CoreAudioHALFormatProbe.isDeviceAlive(AudioDeviceID(kAudioObjectUnknown)))
     }
+
+    @Test func explicitStopClearsACompletedSessionsDisconnectFailure() {
+        let failed = HALDSFPlaybackStatus(
+            state: .failed,
+            samplePosition: 32,
+            sampleCount: 64,
+            underrunCount: 1,
+            outputChannelCount: 2,
+            failureDescription: HiFiPlaybackError.deviceDisconnected.localizationKey
+        )
+
+        let stopped = failed.stoppedClearingFailure()
+
+        #expect(stopped.state == .stopped)
+        #expect(stopped.samplePosition == failed.samplePosition)
+        #expect(stopped.sampleCount == failed.sampleCount)
+        #expect(stopped.underrunCount == failed.underrunCount)
+        #expect(stopped.outputChannelCount == failed.outputChannelCount)
+        #expect(stopped.failureDescription == nil)
+    }
 }
