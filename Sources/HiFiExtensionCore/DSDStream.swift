@@ -40,3 +40,17 @@ public enum DSDStreamError: Error, Equatable, Sendable {
     case truncatedAudioData
     case unsupportedFormat
 }
+
+public enum DSDStreamFactory {
+    public static func make(fileAt url: URL, outputMap: [Int?]? = nil) throws -> any DSDStream {
+        let descriptor = try DSDContainerParser.parse(fileAt: url)
+        switch (descriptor.kind, descriptor.compression) {
+        case (.dsf, .rawDSD):
+            return try DSFRawStream(fileAt: url)
+        case (.dff, .rawDSD):
+            return try DFFRawStream(fileAt: url, outputMap: outputMap)
+        default:
+            throw DSDStreamError.unsupportedFormat
+        }
+    }
+}

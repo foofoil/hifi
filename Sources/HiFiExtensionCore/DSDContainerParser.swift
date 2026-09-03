@@ -26,9 +26,56 @@ public struct DSDContainerDescriptor: Codable, Equatable, Sendable {
     public let audioDataOffset: UInt64
     public let audioDataByteCount: UInt64
     public let metadataOffset: UInt64?
+    public let channelLabels: [String]
 
     public var duration: TimeInterval? {
         sampleCount.map { TimeInterval($0) / TimeInterval(sampleRate) }
+    }
+
+    /// 立体声播放使用的声道下标；多声道 DFF 优先取 SLFT/SRGT 或 MLFT/MRGT。
+    public var stereoChannelIndices: [Int]? {
+        let pairs = [("SLFT", "SRGT"), ("MLFT", "MRGT")]
+        for (left, right) in pairs {
+            if let leftIndex = channelLabels.firstIndex(of: left),
+               let rightIndex = channelLabels.firstIndex(of: right) {
+                return [leftIndex, rightIndex]
+            }
+        }
+        guard channelCount >= 2 else { return nil }
+        return [0, 1]
+    }
+
+    /// 按设备能力尝试的输出映射：原声道数 → 5.0 补 LFE 成 5.1/7.1 → 立体声对。
+    public func playbackOutputMaps() -> [[Int?]] {
+        if kind == .dsf {
+            return channelCount == 2 ? [[0, 1]] : []
+        }
+        guard channelCount >= 2 else { return [] }
+        let native = (0..<channelCount).map { Optional($0) }
+        if channelCount == 2 { return [native] }
+        var maps = [native]
+        if let surround6 = surroundMap(paddingTo: 6) { maps.append(surround6) }
+        if let surround8 = surroundMap(paddingTo: 8) { maps.append(surround8) }
+        if let stereo = stereoChannelIndices {
+            maps.append(stereo.map { Optional($0) })
+        }
+        return maps
+    }
+
+    /// ITU 5.1 顺序 L R C LFE Ls Rs；5.0 文件的 LFE 填静音。
+    private func surroundMap(paddingTo count: Int) -> [Int?]? {
+        func index(_ labels: [String]) -> Int? {
+            labels.compactMap { channelLabels.firstIndex(of: $0) }.first
+        }
+        guard let left = index(["MLFT", "SLFT"]),
+              let right = index(["MRGT", "SRGT"]),
+              let center = index(["C   "]),
+              let leftSurround = index(["LS  "]),
+              let rightSurround = index(["RS  "]) else { return nil }
+        let fivePointOne: [Int?] = [left, right, center, nil, leftSurround, rightSurround]
+        if count == 6 { return fivePointOne }
+        if count == 8 { return fivePointOne + [nil, nil] }
+        return nil
     }
 }
 
@@ -131,7 +178,8 @@ public enum DSDContainerParser {
             bitOrder: format.bitOrder,
             audioDataOffset: audio.offset,
             audioDataByteCount: audio.byteCount,
-            metadataOffset: metadataPointer == 0 ? nil : metadataPointer
+            metadataOffset: metadataPointer == 0 ? nil : metadataPointer,
+            channelLabels: []
         )
     }
 
@@ -148,6 +196,7 @@ public enum DSDContainerParser {
         var offset = 16
         var sampleRate: Int?
         var channelCount: Int?
+        var channelLabels: [String] = []
         var compression: DSDCompression?
         var audio: (offset: UInt64, byteCount: UInt64)?
 
@@ -168,7 +217,14 @@ public enum DSDContainerParser {
                         sampleRate = Int(try data.uint32BE(at: property.payloadOffset))
                     case "CHNL":
                         guard property.size >= 2 else { throw DSDContainerError.invalidChunk(property.identifier) }
-                        channelCount = Int(try data.uint16BE(at: property.payloadOffset))
+                        let count = Int(try data.uint16BE(at: property.payloadOffset))
+                        guard count > 0, property.size >= 2 + count * 4 else {
+                            throw DSDContainerError.invalidChunk(property.identifier)
+                        }
+                        channelCount = count
+                        channelLabels = try (0..<count).map { index in
+                            try data.ascii(at: property.payloadOffset + 2 + index * 4, count: 4)
+                        }
                     case "CMPR":
                         guard property.size >= 4 else { throw DSDContainerError.invalidChunk(property.identifier) }
                         let identifier = try data.ascii(at: property.payloadOffset, count: 4)
@@ -214,7 +270,8 @@ public enum DSDContainerParser {
             bitOrder: .mostSignificantBitFirst,
             audioDataOffset: audio.offset,
             audioDataByteCount: audio.byteCount,
-            metadataOffset: nil
+            metadataOffset: nil,
+            channelLabels: channelLabels
         )
     }
 

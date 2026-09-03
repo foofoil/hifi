@@ -27,7 +27,7 @@ let arguments = Array(CommandLine.arguments.dropFirst())
 guard arguments == ["--devices"] || arguments.count == 1
         || (arguments.count == 2 && arguments[0] == "--stream-check") else {
     FileHandle.standardError.write(Data(
-        "Usage: hifi-inspect <file.dsf|file.dff|--devices> | hifi-inspect --stream-check <file.dsf>\n".utf8
+        "Usage: hifi-inspect <file.dsf|file.dff|--devices> | hifi-inspect --stream-check <file.dsf|file.dff>\n".utf8
     ))
     exit(64)
 }
@@ -43,7 +43,7 @@ do {
         let descriptor = try DSDContainerParser.parse(fileAt: url)
         let streamCheck: StreamCheck?
         if checksStream {
-            let stream = try DSFRawStream(fileAt: url)
+            let stream = try DSDStreamFactory.make(fileAt: url)
             let first = try stream.read(maximumByteFrames: 16)
             var doPEncoder = DoPFrameEncoder()
             let doPByteFrameCount = first.byteFrameCount - first.byteFrameCount % 2

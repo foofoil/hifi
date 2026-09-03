@@ -54,6 +54,8 @@ struct DSDContainerParserTests {
         #expect(raw.compression == .rawDSD)
         #expect(raw.sampleRate == 2_822_400)
         #expect(raw.channelCount == 2)
+        #expect(raw.channelLabels == ["SLFT", "SRGT"])
+        #expect(raw.stereoChannelIndices == [0, 1])
         #expect(raw.sampleCount == 64)
         #expect(raw.bitOrder == .mostSignificantBitFirst)
 
@@ -213,6 +215,127 @@ struct DSDContainerParserTests {
         }
     }
 
+    @Test func dffStreamReadsInterleavedMSBBytesAndSeeks() throws {
+        let audio: [UInt8] = [
+            0x11, 0x22,
+            0x33, 0x44,
+            0x55, 0x66,
+            0x77, 0x88
+        ]
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("foofoil-hifi-dff-stream-\(UUID().uuidString).dff")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try makeDFF(
+            compression: "DSD ",
+            audioChunk: "DSD ",
+            audioPayload: Data(audio)
+        ).write(to: url)
+
+        let stream = try DFFRawStream(fileAt: url)
+        #expect(stream.format == DSDStreamFormat(
+            sampleRate: 2_822_400,
+            channelCount: 2,
+            bitOrder: .mostSignificantBitFirst
+        ))
+        #expect(stream.sampleCount == 32)
+        #expect(try stream.read(maximumByteFrames: 2).bytesByChannel == [
+            [0x11, 0x33],
+            [0x22, 0x44]
+        ])
+        try stream.seek(toSample: 16)
+        #expect(try stream.read(maximumByteFrames: 8).bytesByChannel == [
+            [0x55, 0x77],
+            [0x66, 0x88]
+        ])
+        #expect(stream.samplePosition == 32)
+        #expect(try stream.read(maximumByteFrames: 1).isEmpty)
+        #expect(throws: DSDStreamError.seekMustBeByteAligned) {
+            try stream.seek(toSample: 1)
+        }
+
+        let dstURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("foofoil-hifi-dff-dst-\(UUID().uuidString).dff")
+        defer { try? FileManager.default.removeItem(at: dstURL) }
+        try makeDFF(compression: "DST ", audioChunk: "DST ").write(to: dstURL)
+        #expect(throws: DSDStreamError.unsupportedFormat) {
+            _ = try DFFRawStream(fileAt: dstURL)
+        }
+    }
+
+    @Test func dffStreamSelectsMixPairFromFiveChannelFile() throws {
+        let audio: [UInt8] = [
+            0x11, 0x22, 0x33, 0x44, 0x55,
+            0x66, 0x77, 0x88, 0x99, 0xAA
+        ]
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("foofoil-hifi-dff-5ch-\(UUID().uuidString).dff")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try makeDFF(
+            compression: "DSD ",
+            audioChunk: "DSD ",
+            audioPayload: Data(audio),
+            channelIDs: ["MLFT", "MRGT", "C   ", "LS  ", "RS  "]
+        ).write(to: url)
+
+        let descriptor = try DSDContainerParser.parse(fileAt: url)
+        #expect(descriptor.channelCount == 5)
+        #expect(descriptor.channelLabels == ["MLFT", "MRGT", "C   ", "LS  ", "RS  "])
+        #expect(descriptor.stereoChannelIndices == [0, 1])
+        #expect(HALDSFPlaybackEngine.supportsStereoPlayback(descriptor))
+
+        let stream = try DFFRawStream(fileAt: url)
+        #expect(stream.format.channelCount == 2)
+        #expect(try stream.read(maximumByteFrames: 2).bytesByChannel == [
+            [0x11, 0x66],
+            [0x22, 0x77]
+        ])
+
+        #expect(descriptor.playbackOutputMaps() == [
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, nil, 3, 4],
+            [0, 1, 2, nil, 3, 4, nil, nil],
+            [0, 1]
+        ])
+
+        let native = try DFFRawStream(fileAt: url, outputMap: [0, 1, 2, 3, 4])
+        #expect(native.format.channelCount == 5)
+        #expect(try native.read(maximumByteFrames: 1).bytesByChannel == [
+            [0x11], [0x22], [0x33], [0x44], [0x55]
+        ])
+
+        let padded = try DFFRawStream(fileAt: url, outputMap: [0, 1, 2, nil, 3, 4])
+        #expect(padded.format.channelCount == 6)
+        #expect(try padded.read(maximumByteFrames: 1).bytesByChannel == [
+            [0x11], [0x22], [0x33], [0x69], [0x44], [0x55]
+        ])
+    }
+
+    @Test func dffDoPSourceProducesFloatFramesFromInterleavedBytes() throws {
+        let audio = Data([
+            0x11, 0x55,
+            0x22, 0x66,
+            0x33, 0x77,
+            0x44, 0x88
+        ])
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("foofoil-hifi-dff-dop-\(UUID().uuidString).dff")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try makeDFF(
+            compression: "DSD ",
+            audioChunk: "DSD ",
+            audioPayload: audio
+        ).write(to: url)
+
+        let source = try DSFDoPSource(
+            fileAt: url,
+            physicalFormat: physicalFormat(rate: 176_400, bits: 32)
+        )
+        let samples = try source.read(maximumDoPFrames: 2)
+        let recovered = samples.map { UInt32(bitPattern: Int32($0 * 2_147_483_648)) }
+        #expect(recovered == [0x0511_2200, 0x0555_6600, 0xFA33_4400, 0xFA77_8800])
+        #expect(try source.read(maximumDoPFrames: 1).isEmpty)
+    }
+
     @Test func spscRingBufferPreservesInterleavedFramesAcrossWraparound() {
         let ring = SPSCFloatRingBuffer(capacityFrames: 3, channelCount: 2)
         let first: [Float32] = [1, 2, 3, 4, 5, 6]
@@ -292,20 +415,25 @@ struct DSDContainerParserTests {
         return data
     }
 
-    private func makeDFF(compression: String, audioChunk: String) -> Data {
+    private func makeDFF(
+        compression: String,
+        audioChunk: String,
+        audioPayload: Data = Data(repeating: 0x96, count: 16),
+        channelIDs: [String] = ["SLFT", "SRGT"]
+    ) -> Data {
         var soundProperties = Data("SND ".utf8)
         var sampleRate = Data()
         sampleRate.appendBE(UInt32(2_822_400))
         soundProperties.append(bigEndianChunk("FS  ", payload: sampleRate))
         var channels = Data()
-        channels.appendBE(UInt16(2))
-        channels.append(Data("SLFTSRGT".utf8))
+        channels.appendBE(UInt16(channelIDs.count))
+        channels.append(Data(channelIDs.joined().utf8))
         soundProperties.append(bigEndianChunk("CHNL", payload: channels))
         soundProperties.append(bigEndianChunk("CMPR", payload: Data(compression.utf8)))
 
         var body = Data("DSD ".utf8)
         body.append(bigEndianChunk("PROP", payload: soundProperties))
-        body.append(bigEndianChunk(audioChunk, payload: Data(repeating: 0x96, count: 16)))
+        body.append(bigEndianChunk(audioChunk, payload: audioPayload))
         var data = Data("FRM8".utf8)
         data.appendBE(UInt64(body.count))
         data.append(body)

@@ -14,6 +14,7 @@ public struct HALDSFPlaybackStatus: Codable, Equatable, Sendable {
     public let samplePosition: UInt64
     public let sampleCount: UInt64
     public let underrunCount: UInt64
+    public let outputChannelCount: Int
     public let failureDescription: String?
 }
 
@@ -26,16 +27,28 @@ public enum HALDSFPlaybackError: Error, Equatable, Sendable {
 /// Phase 0 的进程内播放引擎；文件读取与 DoP 封装在 worker，HAL callback 只消费固定缓冲。
 public final class HALDSFPlaybackEngine: @unchecked Sendable {
     private let lock = NSLock()
+    private let eventQueue = DispatchQueue(label: "foofoil.hifi.device-events")
     private var activeSession: PlaybackSession?
+    private var deviceWatch: DeviceLifecycleWatch?
     private var lastStatus = HALDSFPlaybackStatus(
         state: .idle,
         samplePosition: 0,
         sampleCount: 0,
         underrunCount: 0,
+        outputChannelCount: 0,
         failureDescription: nil
     )
 
     public init() {}
+
+    public static func supportsStereoPlayback(_ descriptor: DSDContainerDescriptor) -> Bool {
+        switch descriptor.kind {
+        case .dsf:
+            descriptor.channelCount == 2
+        case .dff:
+            descriptor.stereoChannelIndices != nil
+        }
+    }
 
     deinit {
         _ = try? stop()
@@ -44,25 +57,39 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
     public func play(fileAt url: URL, deviceUID: String, startingSample: UInt64 = 0) throws {
         try stop()
         let descriptor = try DSDContainerParser.parse(fileAt: url)
-        guard descriptor.kind == .dsf,
-              descriptor.compression == .rawDSD,
-              descriptor.channelCount == 2,
-              let sampleCount = descriptor.sampleCount else {
+        guard descriptor.compression == .rawDSD,
+              let sampleCount = descriptor.sampleCount,
+              Self.supportsStereoPlayback(descriptor) else {
             throw HALDSFPlaybackError.unsupportedSource
         }
         guard startingSample <= sampleCount, startingSample.isMultiple(of: 16) else {
             throw HALDSFPlaybackError.invalidStartPosition
         }
 
-        let plan = try CoreAudioHALFormatProbe.plan(
-            deviceUID: deviceUID,
-            dsdSampleRate: descriptor.sampleRate
-        )
-        let configured = try ConfiguredDevice(plan: plan)
+        var selected: (plan: DoPTransportPlan, outputMap: [Int?])?
+        var lastProbeError: Error?
+        for outputMap in descriptor.playbackOutputMaps() {
+            do {
+                let plan = try CoreAudioHALFormatProbe.plan(
+                    deviceUID: deviceUID,
+                    dsdSampleRate: descriptor.sampleRate,
+                    channelCount: outputMap.count
+                )
+                selected = (plan, outputMap)
+                break
+            } catch {
+                lastProbeError = error
+            }
+        }
+        guard let selected else {
+            throw lastProbeError ?? HALDSFPlaybackError.unsupportedSource
+        }
+        let configured = try ConfiguredDevice(plan: selected.plan)
         do {
             let source = try DSFDoPSource(
                 fileAt: url,
-                physicalFormat: CoreAudioHALFormatProbe.describe(configured.physicalFormat)
+                physicalFormat: CoreAudioHALFormatProbe.describe(configured.physicalFormat),
+                outputMap: selected.outputMap
             )
             try source.seek(toSample: startingSample)
             let session = PlaybackSession(
@@ -76,36 +103,35 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
             lock.lock()
             activeSession = session
             lastStatus = session.status(state: .playing)
+            let watch = DeviceLifecycleWatch(
+                deviceID: configured.deviceID,
+                deviceUID: configured.deviceUID,
+                holdsHogMode: configured.acquiredHogMode,
+                queue: eventQueue
+            ) { [weak self] event in
+                self?.handleDeviceEvent(event)
+            }
+            deviceWatch = watch
             lock.unlock()
+            watch.start()
             session.startProducer { [weak self, weak session] failure in
                 guard let self, let session else { return }
                 self.finish(session: session, failure: failure)
             }
         } catch {
             try? configured.restore()
-            throw error
+            throw HiFiPlaybackError.from(error)
         }
     }
 
     @discardableResult
     public func stop() throws -> HALDSFPlaybackStatus {
-        lock.lock()
-        let session = activeSession
-        activeSession = nil
-        lock.unlock()
-        guard let session else { return status() }
-
-        session.requestStop()
-        let cleanupError = session.stopIOAndRestore()
-        let stopped = session.status(
-            state: cleanupError == nil ? .stopped : .failed,
-            failureDescription: cleanupError.map(String.init(describing:))
-        )
-        lock.lock()
-        lastStatus = stopped
-        lock.unlock()
-        if let cleanupError { throw cleanupError }
-        return stopped
+        let status = teardown(expectedSession: nil, failure: nil, stateIfClean: .stopped)
+        if status.state == .failed {
+            throw HiFiPlaybackError(localizationKey: status.failureDescription ?? "")
+                ?? HiFiPlaybackError.outputInitializationFailure
+        }
+        return status
     }
 
     public func status() -> HALDSFPlaybackStatus {
@@ -114,40 +140,76 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
         return activeSession?.status(state: .playing) ?? lastStatus
     }
 
-    private func finish(session: PlaybackSession, failure: Error?) {
-        lock.lock()
-        guard activeSession === session else {
-            lock.unlock()
-            return
+    private func handleDeviceEvent(_ event: DeviceLifecycleWatch.Event) {
+        switch event {
+        case .disconnected:
+            _ = teardown(expectedSession: nil, failure: HiFiPlaybackError.deviceDisconnected, stateIfClean: .failed)
+        case .busy:
+            _ = teardown(expectedSession: nil, failure: HiFiPlaybackError.deviceBusy, stateIfClean: .failed)
+        case .exclusiveModeLost:
+            _ = teardown(expectedSession: nil, failure: HiFiPlaybackError.exclusiveModeFailure, stateIfClean: .failed)
+        case .systemWillSleep:
+            _ = teardown(expectedSession: nil, failure: nil, stateIfClean: .stopped)
         }
+    }
+
+    private func finish(session: PlaybackSession, failure: Error?) {
+        _ = teardown(
+            expectedSession: session,
+            failure: failure,
+            stateIfClean: .stopped
+        )
+    }
+
+    /// 先摘掉监听再停 IO / 恢复格式，避免拔出路径和用户暂停在锁上互等。
+    @discardableResult
+    private func teardown(
+        expectedSession: PlaybackSession?,
+        failure: Error?,
+        stateIfClean: HALDSFPlaybackState
+    ) -> HALDSFPlaybackStatus {
+        lock.lock()
+        if let expectedSession, activeSession !== expectedSession {
+            lock.unlock()
+            return status()
+        }
+        let session = activeSession
         activeSession = nil
+        let watch = deviceWatch
+        deviceWatch = nil
         lock.unlock()
+
+        watch?.stop()
+        guard let session else { return status() }
 
         session.requestStop()
         let cleanupError = session.stopIOAndRestore()
         let finalError = failure ?? cleanupError
-        let finalStatus = session.status(
-            state: finalError == nil ? .stopped : .failed,
-            failureDescription: finalError.map(String.init(describing:))
+        let stopped = session.status(
+            state: finalError == nil ? stateIfClean : .failed,
+            failureDescription: finalError.map { HiFiPlaybackError.from($0).localizationKey }
         )
         lock.lock()
-        lastStatus = finalStatus
+        lastStatus = stopped
         lock.unlock()
+        return stopped
     }
 }
 
 private final class ConfiguredDevice: @unchecked Sendable {
+    let deviceUID: String
     let deviceID: AudioDeviceID
     let streamID: AudioStreamID
     let physicalFormat: AudioStreamBasicDescription
     let virtualFormat: AudioStreamBasicDescription
+    let acquiredHogMode: Bool
 
     private let originalPhysical: AudioStreamBasicDescription
     private let originalVirtual: AudioStreamBasicDescription
-    private let acquiredHogMode: Bool
     private let restored = Atomic<Bool>(false)
 
     init(plan: DoPTransportPlan) throws {
+        deviceUID = plan.deviceUID
         deviceID = try CoreAudioHALFormatProbe.resolveDeviceID(uid: plan.deviceUID)
         streamID = plan.streamID
         guard try CoreAudioHALFormatProbe.outputStreams(deviceID: deviceID).contains(streamID) else {
@@ -163,7 +225,8 @@ private final class ConfiguredDevice: @unchecked Sendable {
         )
         physicalFormat = try CoreAudioHALFormatProbe.targetFormat(for: plan)
         virtualFormat = CoreAudioHALFormatProbe.float32VirtualFormat(for: physicalFormat)
-        acquiredHogMode = try CoreAudioHALFormatProbe.acquireHogModeIfAvailable(deviceID: deviceID)
+        let acquiredHogMode = try CoreAudioHALFormatProbe.acquireHogModeIfAvailable(deviceID: deviceID)
+        self.acquiredHogMode = acquiredHogMode
 
         do {
             try CoreAudioHALFormatProbe.setStreamFormat(
@@ -199,6 +262,13 @@ private final class ConfiguredDevice: @unchecked Sendable {
             ordering: .acquiringAndReleasing
         )
         guard exchanged.exchanged else { return }
+        // 设备已消失时不要再写 physical/virtual format，以免把断开误报成格式恢复失败。
+        guard CoreAudioHALFormatProbe.isDeviceAlive(deviceID) else {
+            if acquiredHogMode {
+                try? CoreAudioHALFormatProbe.releaseHogMode(deviceID: deviceID)
+            }
+            return
+        }
         var firstError: Error?
         do {
             try CoreAudioHALFormatProbe.setStreamFormat(
@@ -247,8 +317,9 @@ private final class PlaybackSession: @unchecked Sendable {
     let configuredDevice: ConfiguredDevice
     let source: DSFDoPSource
     let startingSample: UInt64
+    let channelCount: Int
 
-    private let ring = SPSCFloatRingBuffer(capacityFrames: ringCapacityFrames, channelCount: 2)
+    private let ring: SPSCFloatRingBuffer
     private let stopRequested = Atomic<Bool>(false)
     private let consumedFrames = Atomic<UInt64>(0)
     private let underrunCount = Atomic<UInt64>(0)
@@ -260,8 +331,10 @@ private final class PlaybackSession: @unchecked Sendable {
         self.configuredDevice = configuredDevice
         self.source = source
         self.startingSample = startingSample
+        channelCount = max(1, Int(configuredDevice.physicalFormat.mChannelsPerFrame))
+        ring = SPSCFloatRingBuffer(capacityFrames: Self.ringCapacityFrames, channelCount: channelCount)
         let format = CoreAudioHALFormatProbe.describe(configuredDevice.physicalFormat)
-        outputTimeline = DoPOutputTimeline(format: format, channelCount: 2)
+        outputTimeline = DoPOutputTimeline(format: format, channelCount: channelCount)
     }
 
     func prefill() throws {
@@ -271,7 +344,7 @@ private final class PlaybackSession: @unchecked Sendable {
             let samples = try source.read(maximumDoPFrames: writable)
             guard !samples.isEmpty else { break }
             let written = samples.withUnsafeBufferPointer { ring.write(interleavedSamples: $0) }
-            guard written == samples.count / 2 else { break }
+            guard written == samples.count / channelCount else { break }
         }
     }
 
@@ -305,7 +378,7 @@ private final class PlaybackSession: @unchecked Sendable {
                     let samples = try source.read(maximumDoPFrames: writable)
                     if samples.isEmpty { break }
                     let written = samples.withUnsafeBufferPointer { ring.write(interleavedSamples: $0) }
-                    guard written == samples.count / 2 else { continue }
+                    guard written == samples.count / channelCount else { continue }
                 }
                 while !stopRequested.load(ordering: .acquiring), ring.availableFrames > 0 {
                     usleep(2_000)
@@ -361,6 +434,7 @@ private final class PlaybackSession: @unchecked Sendable {
             ),
             sampleCount: source.sampleCount,
             underrunCount: underrunCount.load(ordering: .acquiring),
+            outputChannelCount: channelCount,
             failureDescription: failureDescription
         )
     }
@@ -370,11 +444,11 @@ private final class PlaybackSession: @unchecked Sendable {
         let buffers = UnsafeMutableAudioBufferListPointer(outputData)
         guard buffers.count == 1,
               let data = buffers[0].mData,
-              buffers[0].mNumberChannels == 2 else {
+              buffers[0].mNumberChannels == UInt32(channelCount) else {
             underrunCount.wrappingAdd(1, ordering: .relaxed)
             return
         }
-        let frameCount = Int(buffers[0].mDataByteSize) / (2 * MemoryLayout<Float32>.size)
+        let frameCount = Int(buffers[0].mDataByteSize) / (channelCount * MemoryLayout<Float32>.size)
         let output = data.assumingMemoryBound(to: Float32.self)
         let readFrames = ring.read(into: output, maximumFrames: frameCount)
         consumedFrames.wrappingAdd(UInt64(readFrames), ordering: .relaxed)

@@ -61,11 +61,16 @@ public enum CoreAudioHALFormatProbeError: Error, Equatable, Sendable {
 }
 
 public enum CoreAudioHALFormatProbe {
-    public static func plan(deviceUID: String, dsdSampleRate: Int) throws -> DoPTransportPlan {
+    public static func plan(
+        deviceUID: String,
+        dsdSampleRate: Int,
+        channelCount: Int = 2
+    ) throws -> DoPTransportPlan {
         let carrierRate = try carrierSampleRate(for: dsdSampleRate)
         let deviceID = try resolveDeviceID(uid: deviceUID)
         let streams = try outputStreams(deviceID: deviceID)
         guard !streams.isEmpty else { throw CoreAudioHALFormatProbeError.noOutputStream }
+        let channels = UInt32(channelCount)
 
         let candidates = try streams.flatMap { streamID in
             try availableFormats(streamID: streamID).compactMap { ranged -> RawCandidate? in
@@ -74,7 +79,7 @@ public enum CoreAudioHALFormatProbe {
                       carrierRate <= ranged.mSampleRateRange.mMaximum,
                       format.mFormatID == kAudioFormatLinearPCM,
                       format.mFormatFlags & kAudioFormatFlagIsFloat == 0,
-                      format.mChannelsPerFrame >= 2,
+                      format.mChannelsPerFrame == channels,
                       format.mBitsPerChannel >= 24 else { return nil }
                 var exact = format
                 exact.mSampleRate = carrierRate
@@ -336,6 +341,18 @@ public enum CoreAudioHALFormatProbe {
         throw CoreAudioHALFormatProbeError.hogModeAcquireFailed
     }
 
+    static func isDeviceAlive(_ deviceID: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsAlive,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var alive: UInt32 = 0
+        var dataSize = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &alive)
+        return status == noErr && alive != 0
+    }
+
     static func releaseHogMode(deviceID: AudioDeviceID) throws {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyHogMode,
@@ -360,7 +377,7 @@ public enum CoreAudioHALFormatProbe {
         throw CoreAudioHALFormatProbeError.hogModeReleaseFailed
     }
 
-    private static func hogModeOwner(
+    static func hogModeOwner(
         deviceID: AudioDeviceID,
         address: inout AudioObjectPropertyAddress
     ) throws -> pid_t {

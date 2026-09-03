@@ -1,6 +1,6 @@
 import Foundation
 
-/// 在非实时 worker 上把 DSF 的逐声道 DSD 字节转换为 HAL Float32 virtual frames。
+/// 在非实时 worker 上把 `DSDStream` 的逐声道 DSD 字节转换为 HAL Float32 virtual frames。
 public final class DSFDoPSource {
     public let channelCount: Int
     public let dsdSampleRate: Int
@@ -8,12 +8,16 @@ public final class DSFDoPSource {
     public var samplePosition: UInt64 { stream.samplePosition }
     public var sampleCount: UInt64 { stream.sampleCount }
 
-    private let stream: DSFRawStream
+    private let stream: any DSDStream
     private let physicalFormat: HiFiAudioPhysicalFormat
     private var encoder = DoPFrameEncoder()
 
-    public init(fileAt url: URL, physicalFormat: HiFiAudioPhysicalFormat) throws {
-        stream = try DSFRawStream(fileAt: url)
+    public init(
+        fileAt url: URL,
+        physicalFormat: HiFiAudioPhysicalFormat,
+        outputMap: [Int?]? = nil
+    ) throws {
+        stream = try DSDStreamFactory.make(fileAt: url, outputMap: outputMap)
         guard stream.format.channelCount == Int(physicalFormat.channelCount) else {
             throw DSDStreamError.unsupportedFormat
         }

@@ -12,11 +12,11 @@ The extension adds high-resolution and DSD playback that the lightweight foofoil
 
 The current tree is the Phase 0 development prototype extracted from foofoil's `hifi-ext` branch:
 
-- DSF raw DSD → DoP → CoreAudio HAL → USB DAC
-- Verified on a Stereo DSD64 device
+- DSF / raw DFF → DoP → CoreAudio HAL → USB DAC
+- Stereo DSD64 DSF and stereo DFF verified on an SMSL DAC; 5.0 DFF uses surround DoP when the device allows it, otherwise a stereo fold
 - Host session commands for play, pause, progress, output-device selection, and device release on close
 
-Not yet a shipping release. Remaining work includes DSD → PCM fallback, raw DFF / DST / SACD ISO, complete seek, playback-queue and navigator integration, metadata and artwork, session restore, additional DSD rates, process isolation, and signed/notarized GitHub Releases for in-app install.
+Not yet a shipping release. Remaining work includes DSD → PCM fallback, DST / SACD ISO, dedicated metadata, session restore, DSD128/256 hardware regression, process isolation, and signed/notarized GitHub Releases for in-app install. Device disconnect/hog/sleep recovery is implemented and waiting on real-DAC confirmation.
 
 See [docs/hifi-phase0-dsf-playback-handoff.md](docs/hifi-phase0-dsf-playback-handoff.md) and [docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md](docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md).
 

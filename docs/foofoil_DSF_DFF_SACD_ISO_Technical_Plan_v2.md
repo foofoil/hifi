@@ -732,7 +732,9 @@ ContentRequest
 5. 普通音频与 DSF 的统一列表、拖拽排序、动态图标、键盘/媒体键和播放模式已成立；
 6. 封面、metadata 外壳、播放控件和技术信息复用宿主 UI，没有插件自定义列表；
 7. 关闭 Session 会恢复设备格式并释放 Hog Mode；切换 Provider 前宿主等待释放完成；
-8. DFF、DST、PCM fallback、Engine Service 与正式 Release 安装仍属后续工作。
+8. DST、PCM fallback、Engine Service 与正式 Release 安装仍属后续工作；
+9. raw DFF 已接通 DoP/HAL：立体声 DFF DSD64 已在 SMSL 上验收；5.0 DFF 按设备格式走 5ch / 5.1 / 7.1 或立体声折混；
+10. 设备断开/占用/Hog/睡眠恢复代码已落地，待真实 DAC 手测。
 
 ### Phase 1：DSF / DFF 可发布版本
 
@@ -810,14 +812,13 @@ Hi-Fi 与 foofoil 独立发版。队列、Track ID 和设置状态需要 schema 
 
 ## 21. 建议下一步
 
-Phase 0 的 DSF/DoP 与统一列表 Spike 已打通。下一步按风险排序：
+Phase 0 的 DSF/DoP 与统一列表 Spike 已打通。raw DFF 立体声已实机验收；5.0 输出随 DAC 能力选择；拔插/占用/睡眠仍待真实 DAC 手测。下一步按风险排序：
 
-1. 用真实 DAC 回归 DSD → 普通音频、DSD → DSD、暂停/恢复、长时播放、拔插和设备被占用；
-2. 完成 DSD128/256 硬件矩阵及结构化设备错误；
-3. 实现 raw DFF source，并复用现有 DoP/HAL 管线；
-4. 实现 DSD → PCM fallback 与 Automatic / Prefer DoP / Always PCM 策略；
-5. 再加入 DST、专项 metadata、Session 恢复和正式发布流程；
-6. SACD ISO 开工前先定义宿主可持久化的虚拟媒体项 contract，避免退回“一 Track 一假 URL”或插件自绘列表。
+1. 用真实 DAC 验收断开、占用、Hog 失败和睡眠唤醒；
+2. 有环绕 DoP DAC 时回归 5.0/5.1；完成 DSD128/256 硬件矩阵；
+3. 实现 DSD → PCM fallback 与 Automatic / Prefer DoP / Always PCM 策略；
+4. 再加入 DST、专项 metadata、Session 恢复和正式发布流程；
+5. SACD ISO 开工前先定义宿主可持久化的虚拟媒体项 contract，避免退回“一 Track 一假 URL”或插件自绘列表。用户现有 ISO 为 Stereo raw DSD64，不能当作 DFF 测试盘。
 
 ---
 

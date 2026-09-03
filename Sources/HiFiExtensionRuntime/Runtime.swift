@@ -66,8 +66,9 @@ private func prepareSources(request: [String: Any]) throws -> [RuntimeSource] {
         }
         let access = RuntimeResourceAccess(resource: resource, fallbackURL: fallbackURL)
         let descriptor = try DSDContainerParser.parse(fileAt: access.url)
-        guard descriptor.kind == .dsf, descriptor.compression == .rawDSD,
-              descriptor.channelCount == 2, descriptor.sampleCount != nil else {
+        guard descriptor.compression == .rawDSD,
+              descriptor.sampleCount != nil,
+              HALDSFPlaybackEngine.supportsStereoPlayback(descriptor) else {
             throw RuntimeControllerError.invalidSource
         }
         return RuntimeSource(id: "file:\(index)", access: access, descriptor: descriptor)
@@ -367,7 +368,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 if playingSessionID == id { playingSessionID = nil }
                 lock.unlock()
                 record.playbackState = "failed"
-                record.failureDescription = String(describing: error)
+                record.failureDescription = failureKey(error)
             }
         case "hifi.pause":
             let status = try player.stop()
@@ -409,7 +410,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                     lock.unlock()
                 } catch {
                     record.playbackState = "failed"
-                    record.failureDescription = String(describing: error)
+                    record.failureDescription = failureKey(error)
                 }
             } else if record.playbackState == "idle" || record.playbackState == "stopped" {
                 record.playbackState = "paused"
@@ -539,7 +540,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 lock.lock(); playingSessionID = record.id; lock.unlock()
             } catch {
                 record.playbackState = "failed"
-                record.failureDescription = String(describing: error)
+                record.failureDescription = failureKey(error)
             }
         }
     }
@@ -602,8 +603,17 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
         if wasTracked, status.state != .playing {
             playingSessionID = nil
-            record.playbackState = status.state == .failed ? "failed" : "stopped"
-            record.failureDescription = status.failureDescription
+            if status.state == .failed {
+                record.playbackState = "failed"
+                record.failureDescription = status.failureDescription
+            } else if record.sampleCount > 0, status.samplePosition >= record.sampleCount {
+                record.playbackState = "stopped"
+                record.failureDescription = status.failureDescription
+            } else {
+                // 睡眠或设备恢复导致的中途停止保持暂停，避免被当成播完切歌。
+                record.playbackState = "paused"
+                record.failureDescription = nil
+            }
         }
         let isPlaying = playingSessionID == record.id && status.state == .playing
         lock.unlock()
@@ -622,7 +632,12 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             if isPlaying, let deviceID = record.selectedDeviceID,
                let devices = selection["devices"] as? [[String: Any]],
                let device = devices.first(where: { $0["id"] as? String == deviceID }) {
-                selection["statusDescription"] = "DSD\(record.sampleRate / 44_100) · DoP · \(device["displayName"] as? String ?? deviceID)"
+                selection["statusDescription"] = dopStatusDescription(
+                    sampleRate: record.sampleRate,
+                    sourceChannels: record.sources[record.currentIndex].descriptor.channelCount,
+                    outputChannels: Int(status.outputChannelCount),
+                    deviceName: device["displayName"] as? String ?? deviceID
+                )
             }
             session["audioDeviceSelection"] = selection
         }
@@ -707,4 +722,38 @@ private enum RuntimeControllerError: Error {
     case invalidPlaybackPosition
     case invalidQueueOrder
     case invalidSource
+}
+
+private func dopStatusDescription(
+    sampleRate: Int,
+    sourceChannels: Int,
+    outputChannels: Int,
+    deviceName: String
+) -> String {
+    let dsd = "DSD\(sampleRate / 44_100)"
+    let route: String
+    if sourceChannels > 2, outputChannels == 2 {
+        route = "\(sourceChannels)ch→Stereo · DoP"
+    } else if sourceChannels == 5, outputChannels == 6 {
+        route = "5.0→5.1 · DoP"
+    } else if sourceChannels == 5, outputChannels == 8 {
+        route = "5.0→7.1 · DoP"
+    } else if sourceChannels > 2 {
+        route = "\(sourceChannels)ch · DoP"
+    } else {
+        route = "DoP"
+    }
+    return "\(dsd) · \(route) · \(deviceName)"
+}
+
+private func failureKey(_ error: Error) -> String {
+    if let error = error as? RuntimeControllerError {
+        switch error {
+        case .noOutputDevice, .invalidSession, .invalidPlaybackPosition, .invalidQueueOrder:
+            return HiFiPlaybackError.outputInitializationFailure.localizationKey
+        case .invalidSource:
+            return HiFiPlaybackError.unsupportedSource.localizationKey
+        }
+    }
+    return HiFiPlaybackError.from(error).localizationKey
 }

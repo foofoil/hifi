@@ -12,11 +12,11 @@ Hi-Fi 是 foofoil 的第一方扩展，不能作为独立播放器运行。请�
 
 当前代码是从 foofoil `hifi-ext` 功能分支抽出的 Phase 0 开发样机：
 
-- DSF raw DSD → DoP → CoreAudio HAL → USB DAC
-- 已在 Stereo DSD64 设备上完成播放验收
+- DSF / raw DFF → DoP → CoreAudio HAL → USB DAC
+- Stereo DSD64 DSF 与立体声 DFF 已在 SMSL DAC 上验收；5.0 DFF 按设备能力输出环绕或折成立体声
 - 宿主侧具备播放、暂停、进度轮询、输出设备选择和关闭时释放设备的能力
 
-这还不是正式发布。尚未完成的工作包括 DSD → PCM fallback、raw DFF / DST / SACD ISO、完整 seek、播放队列与 Navigator 闭环、metadata 与封面、Session 恢复、更多 DSD 速率、进程隔离，以及可供应用内安装的签名与公证 GitHub Release。
+这还不是正式发布。尚未完成的工作包括 DSD → PCM fallback、DST / SACD ISO、专项 metadata、Session 恢复、DSD128/256 硬件回归、进程隔离，以及可供应用内安装的签名与公证 GitHub Release。设备断开/占用/睡眠恢复已实现，待真实 DAC 手测。
 
 详见 [docs/hifi-phase0-dsf-playback-handoff.md](docs/hifi-phase0-dsf-playback-handoff.md) 和 [docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md](docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md)。
 
