@@ -810,15 +810,28 @@ UI 从第一版接受 DoP 的 Fixed Volume 状态，不能为了保留滑块破�
 
 Hi-Fi 与 foofoil 独立发版。队列、Track ID 和设置状态需要 schema version、迁移和损坏回退；旧 Session 不能依赖 decoder 私有二进制布局。
 
+### 20.7 通用音频输出设备选择（首版已实现，部分实机通过）
+
+该能力属于 Hi-Fi 扩展，但服务范围是整个应用而不是单个 DSD Session。`extension-kit` 在 ABI v1 结构末尾追加可选 application command，并以 `struct_size` 保持旧 runtime 前缀兼容。Hi-Fi 枚举 CoreAudio 设备、持有 PCM Hog/格式 lease、保存所选 UID；foofoil 的普通 PCM 播放器只负责将 `AVAudioEngine` output AudioUnit 路由到 Hi-Fi 已准备的设备。
+
+- 未安装 Hi-Fi：普通 PCM 维持系统默认输出，界面不出现设备菜单；
+- 安装 Hi-Fi：PCM 可选「跟随系统默认」或其它可独占设备；选择独占设备时，Hi-Fi 优先将 nominal/physical format 调到音源采样率，设备不支持时保留可用 rate，由 `AVAudioEngine` 做 SRC，并在状态中显示 source → active rate；
+- DSD：仍自动选择支持当前 DSD rate 的设备并独占，也可从右上角菜单切换到其它兼容设备；菜单显示全部设备，但以 runtime 的设备命令状态禁用不支持当前 DSD rate 或已断开的设备，不能依赖宿主元数据推测；
+- 多窗口：PCM lease 与 DSD HAL 互斥，宿主在新箔接管前停止旧 PCM 输出，Hi-Fi 以 client ID 防止旧箔释放新 lease；
+- 退出独占时恢复原 nominal/physical/virtual format 并释放 Hog Mode。
+
+自动化已覆盖契约向后解码、ABI 编译、设备 rate 枚举和三仓构建。普通 PCM 单曲已实测可切换设备，支持设备按音源采样率工作；设备目录缓存和无变化格式跳过已缩短切换等待，旧分段回调失效后也已实测可从切换位置续播。仍需验证系统默认跟随、44.1/48/96/192 kHz 全组合、不支持 rate 的 SRC 状态、DSD 禁用项呈现，以及拔出/睡眠/多窗口争用恢复。
+
 ---
 
 ## 21. 建议下一步
 
 Phase 0 的 DSF/DoP 与统一列表 Spike 已打通。raw DFF 立体声、DSD256、设备断开/占用/Hog/睡眠恢复均已通过真实硬件验收；未压缩立体声 SACD ISO 已在 SMSL 上出声，曲目自然续播也已通过连续两曲实听。5.0 输出随 DAC 能力选择，但因暂无环绕 DoP DAC，真实多声道验收暂缓。下一步按风险排序：
 
-1. 实现 DSD → PCM fallback 与 Automatic / Prefer DoP / Always PCM 策略；
-2. 完成 DSD128 硬件回归；有环绕 DoP DAC 后再回归 5.0/5.1/7.1；
-3. 再加入 DST、SACD 多声道、专项 metadata、Session 恢复和正式发布流程。
+1. 用真实 DAC 验收第 20.7 节的通用输出设备选择与 PCM 采样率跟随；
+2. 实现 DSD → PCM fallback 与 Automatic / Prefer DoP / Always PCM 策略；
+3. 完成 DSD128 硬件回归；有环绕 DoP DAC 后再回归 5.0/5.1/7.1；
+4. 再加入 DST、SACD 多声道、专项 metadata、Session 恢复和正式发布流程。
 
 ---
 

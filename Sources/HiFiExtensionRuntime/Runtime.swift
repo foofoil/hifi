@@ -21,6 +21,7 @@ private struct RuntimeInterfaceV1 {
     var performCommand: RuntimeCall?
     var releaseBytes: ReleaseCall?
     var destroy: DestroyCall?
+    var performApplicationCommand: RuntimeCall?
 }
 
 private enum RuntimeStatus {
@@ -111,10 +112,29 @@ private let performCommandCallback: RuntimeCall = { _, input, inputLength, outpu
     return writeJSON(session, to: output, length: outputLength)
 }
 
+private let performApplicationCommandCallback: RuntimeCall = { _, input, inputLength, output, outputLength in
+    guard let message = jsonObject(input, length: inputLength) else {
+        return RuntimeStatus.invalidMessage
+    }
+    do {
+        let response = try audioDeviceServiceController.perform(
+            message,
+            stopDSDPlayback: { try runtimeController.stopForExternalPCM() }
+        )
+        return writeJSON(response, to: output, length: outputLength)
+    } catch {
+        return RuntimeStatus.processingFailed
+    }
+}
+
 private let releaseCallback: ReleaseCall = { _, bytes, _ in bytes?.deallocate() }
-private let destroyCallback: DestroyCall = { _ in runtimeController.shutdown() }
+private let destroyCallback: DestroyCall = { _ in
+    audioDeviceServiceController.shutdown()
+    runtimeController.shutdown()
+}
 
 private let runtimeController = HiFiRuntimeController()
+private let audioDeviceServiceController = AudioDeviceServiceController()
 
 nonisolated(unsafe) private let interfacePointer: UnsafeMutablePointer<RuntimeInterfaceV1> = {
     let pointer = UnsafeMutablePointer<RuntimeInterfaceV1>.allocate(capacity: 1)
@@ -125,7 +145,8 @@ nonisolated(unsafe) private let interfacePointer: UnsafeMutablePointer<RuntimeIn
         createSession: createSessionCallback,
         performCommand: performCommandCallback,
         releaseBytes: releaseCallback,
-        destroy: destroyCallback
+        destroy: destroyCallback,
+        performApplicationCommand: performApplicationCommandCallback
     ))
     return pointer
 }()
@@ -176,7 +197,8 @@ private func makeSession(
         "\(descriptor.channelCount) × \(descriptor.sampleRate) Hz",
         duration.map { String(format: "%.2f s", $0) }
     ].compactMap { $0 }.joined(separator: "\n")
-    let selected = devices.first(where: \.isSystemDefault) ?? devices.first
+    let compatibleDevices = devices.filter { $0.potentialDoPDSDRates.contains(descriptor.sampleRate) }
+    let selected = compatibleDevices.first(where: \.isSystemDefault) ?? compatibleDevices.first
     let deviceObjects: [[String: Any]] = devices.map {
         [
             "id": $0.id,
@@ -236,7 +258,7 @@ private func makeSession(
             "displayTitle": $0.displayName,
             "parentID": "hifi.output-device",
             "modifierFlags": 0,
-            "isEnabled": $0.isConnected,
+            "isEnabled": $0.isConnected && $0.potentialDoPDSDRates.contains(descriptor.sampleRate),
             "isChecked": $0.id == selected?.id
         ]
     })
@@ -365,7 +387,11 @@ private final class HiFiRuntimeController: @unchecked Sendable {
     private var playingSessionID: UUID?
 
     func registerSession(id: UUID, sources: [RuntimeSource], devices: [HiFiAudioOutputDevice]) {
-        let selectedDeviceID = (devices.first(where: \.isSystemDefault) ?? devices.first)?.id
+        let sampleRate = sources.first?.descriptor.sampleRate
+        let compatible = devices.filter { device in
+            sampleRate.map(device.potentialDoPDSDRates.contains) ?? false
+        }
+        let selectedDeviceID = (compatible.first(where: \.isSystemDefault) ?? compatible.first)?.id
         let record = RuntimeSession(
             id: id,
             sources: sources,
@@ -391,6 +417,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         switch commandID {
         case "hifi.play":
             do {
+                audioDeviceServiceController.releasePCMForDSD()
                 guard let deviceUID = record.selectedDeviceID else {
                     throw RuntimeControllerError.noOutputDevice
                 }
@@ -507,6 +534,20 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         lock.unlock()
     }
 
+    func stopForExternalPCM() throws {
+        lock.lock()
+        let trackedID = playingSessionID
+        let trackedRecord = trackedID.flatMap { sessions[$0] }
+        playingSessionID = nil
+        lock.unlock()
+        guard let trackedRecord else { return }
+        let status = try player.stop()
+        trackedRecord.samplePosition = status.samplePosition
+        trackedRecord.underrunCount = status.underrunCount
+        trackedRecord.playbackState = "paused"
+        trackedRecord.failureDescription = status.failureDescription
+    }
+
     private func selectDevice(
         _ selectedID: String,
         for record: RuntimeSession,
@@ -518,6 +559,10 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
         let devices = selection["devices"] as? [[String: Any]] ?? []
         guard let device = devices.first(where: { $0["id"] as? String == selectedID }) else {
+            throw RuntimeControllerError.noOutputDevice
+        }
+        let supportedRates = (device["supportedDoPRates"] as? [NSNumber])?.map(\.intValue) ?? []
+        guard supportedRates.contains(record.sampleRate) else {
             throw RuntimeControllerError.noOutputDevice
         }
 
@@ -540,6 +585,24 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         selection["revision"] = ((selection["revision"] as? NSNumber)?.uint64Value ?? 0) + 1
         for index in commands.indices where (commands[index]["id"] as? String)?.hasPrefix("hifi.device.") == true {
             commands[index]["isChecked"] = commands[index]["id"] as? String == "hifi.device.\(selectedID)"
+        }
+        if wasPlaying {
+            do {
+                try player.play(
+                    fileAt: record.url,
+                    deviceUID: selectedID,
+                    startingSample: record.samplePosition,
+                    sacdTrackNumber: record.sacdTrackNumber
+                )
+                record.playbackState = "playing"
+                record.failureDescription = nil
+                lock.lock()
+                playingSessionID = record.id
+                lock.unlock()
+            } catch {
+                record.playbackState = "failed"
+                record.failureDescription = failureKey(error)
+            }
         }
         session["audioDeviceSelection"] = selection
         session["commands"] = commands
@@ -813,6 +876,139 @@ private final class RuntimeResourceAccess {
 
     deinit {
         if didStartAccess { url.stopAccessingSecurityScopedResource() }
+    }
+}
+
+private final class AudioDeviceServiceController: @unchecked Sendable {
+    private let lock = NSLock()
+    private let preferenceKey = "app.foofoil.extension.hifi.preferred-pcm-device-uid"
+    private var lease: PCMExclusiveDeviceLease?
+    private var activeClientID: UUID?
+    private var revision: UInt64 = 0
+    private var cachedDevices: [HiFiAudioOutputDevice]?
+
+    func perform(
+        _ message: [String: Any],
+        stopDSDPlayback: () throws -> Void
+    ) throws -> [String: Any] {
+        guard let command = message["command"] as? String,
+              let clientIDText = message["clientID"] as? String,
+              let clientID = UUID(uuidString: clientIDText) else {
+            throw RuntimeControllerError.invalidSession
+        }
+        switch command {
+        case "snapshot":
+            return try snapshot(refreshDevices: true)
+        case "selectSystemDefault":
+            releasePCM()
+            UserDefaults.standard.removeObject(forKey: preferenceKey)
+            bumpRevision()
+        case "prepareExclusivePCM":
+            guard let deviceUID = message["selectedDeviceID"] as? String,
+                  let sampleRate = (message["sourceSampleRate"] as? NSNumber)?.doubleValue,
+                  let channelCount = (message["channelCount"] as? NSNumber)?.intValue else {
+                throw RuntimeControllerError.invalidSession
+            }
+            try stopDSDPlayback()
+            releasePCM()
+            let nextLease = try PCMExclusiveDeviceLease(
+                deviceUID: deviceUID,
+                sourceSampleRate: sampleRate,
+                channelCount: channelCount
+            )
+            lock.lock()
+            lease = nextLease
+            activeClientID = clientID
+            revision &+= 1
+            lock.unlock()
+            UserDefaults.standard.set(deviceUID, forKey: preferenceKey)
+        case "releasePCM":
+            lock.lock()
+            let ownsLease = activeClientID == clientID
+            lock.unlock()
+            if ownsLease { releasePCM() }
+        case "releaseAllPCM":
+            releasePCM()
+        default:
+            throw RuntimeControllerError.invalidSession
+        }
+        return try snapshot(refreshDevices: false)
+    }
+
+    func releasePCMForDSD() {
+        releasePCM()
+    }
+
+    func shutdown() {
+        releasePCM()
+    }
+
+    private func releasePCM() {
+        lock.lock()
+        let oldLease = lease
+        lease = nil
+        activeClientID = nil
+        if oldLease != nil { revision &+= 1 }
+        lock.unlock()
+        try? oldLease?.restore()
+    }
+
+    private func bumpRevision() {
+        lock.lock()
+        revision &+= 1
+        lock.unlock()
+    }
+
+    private func snapshot(refreshDevices: Bool) throws -> [String: Any] {
+        let devices: [HiFiAudioOutputDevice]
+        lock.lock()
+        let cachedDevices = self.cachedDevices
+        lock.unlock()
+        if refreshDevices || cachedDevices == nil {
+            devices = try CoreAudioDeviceCatalog.outputDevices()
+            lock.lock()
+            self.cachedDevices = devices
+            lock.unlock()
+        } else {
+            devices = cachedDevices ?? []
+        }
+        lock.lock()
+        let activeLease = lease
+        let clientID = activeClientID
+        let currentRevision = revision
+        lock.unlock()
+        let preferredUID = UserDefaults.standard.string(forKey: preferenceKey)
+        let activeStatus = try? activeLease?.refreshStatus()
+        let deviceObjects: [[String: Any]] = devices.map {
+            [
+                "id": $0.id,
+                "displayName": $0.displayName,
+                "isSystemDefault": $0.isSystemDefault,
+                "isConnected": $0.isConnected,
+                "hasHardwareVolume": $0.hasHardwareVolume,
+                "supportedDoPRates": $0.potentialDoPDSDRates,
+                "supportsExclusiveMode": $0.supportsExclusiveMode,
+                "supportedPCMSampleRates": $0.supportedPCMSampleRates
+            ]
+        }
+        var result: [String: Any] = [
+            "contractVersion": 1,
+            "devices": deviceObjects,
+            "pcmRouteMode": preferredUID == nil ? "systemDefault" : "exclusiveDevice",
+            "revision": currentRevision
+        ]
+        if let preferredUID { result["selectedPCMDeviceID"] = preferredUID }
+        if let clientID { result["activeClientID"] = clientID.uuidString }
+        if let activeStatus {
+            result["activeDeviceID"] = activeStatus.deviceUID
+            result["activeSampleRate"] = activeStatus.activeSampleRate
+            result["sourceSampleRate"] = activeStatus.sourceSampleRate
+            result["sampleRateMatched"] = activeStatus.sampleRateMatched
+            if let device = devices.first(where: { $0.id == activeStatus.deviceUID }) {
+                result["statusDescription"] = device.displayName
+            }
+        }
+        return result
     }
 }
 

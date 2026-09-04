@@ -247,15 +247,28 @@ HAL callback 禁止文件 I/O、锁、内存分配、JSON、日志或 Swift coll
 - `foofoil` 已提交 DAC 释放屏障 `666e149`、切歌播放意图 `4f5ae49` 与 seek-on-release `0f77844`；ISO sniff、CUE 式曲目列表（曲名 + 左侧序号）与 Session 复用见 `9782820`；
 - 第 4.1 节切换手测、第 4.2 节设备恢复手测均已通过；第 4.3 节立体声 DFF 与 5.0 折混已通过；第 4.4 节 SACD ISO 列表/Seek/出声及自然续播已通过；
 - DSD256 已通过真实硬件验证，DSD128 仍待回归；环绕 5.0/5.1/7.1 DoP 因暂无相应 DAC 暂缓；
+- 通用输出设备选择的首版代码已接通：未安装 Hi-Fi 时 PCM 仍走系统默认；安装 Hi-Fi 后，普通 PCM 可在右上角选择系统默认或其它设备独占输出，独占时会尝试把设备切到音源采样率；DSD 右上角同样可切换支持当前 DSD rate 的设备；
+- 设备目录、PCM Hog/格式 lease 与偏好保存在 Hi-Fi 的 application-scope 服务中，宿主只负责把 `AVAudioEngine` 路由到已准备好的设备；旧 ABI runtime 仍可加载；
+- 上述通用设备选择已通过自动化构建/契约测试；普通 PCM 单曲的设备切换、支持设备按音源采样率工作，以及切换后从原位置续播已通过真实设备验证；其余场景见第 9.1 节；
 - 核心测试以 `swift test` 为准；本地 ISO 存在时 `SACDISOParserTests` 会对照同专辑 DSF 前 16384 字节。
+
+### 9.1 通用输出设备选择验收记录与待验收项
+
+1. 已通过：普通 PCM 单曲可切换输出设备；支持的设备使用音源采样率；切换等待已通过缓存设备目录、跳过无变化格式设置缩短；切换后从保存位置继续播放，不再因旧 completion callback 从头开始；
+2. 待补：普通 PCM 在「跟随系统默认」下保持原有行为；切换系统默认设备后重新播放可跟随新设备；
+3. 待补：选择 USB DAC 后取得 Hog Mode，声音只从该设备输出；继续用 44.1/48/96/192 kHz 文件逐项确认 nominal rate；不支持的采样率应继续播放并明确显示发生 SRC；
+4. 已修复、待回归：DSD 菜单保留显示所有输出设备，但直接使用 Hi-Fi runtime 的 `hifi.device.*` 命令可用状态；不支持当前 DSD rate 或已断开的设备必须禁用，不能点击；
+5. 待补：独占 PCM 与 DSD 互相切换、两个箔争用、暂停/关闭箔、拔出 DAC、睡眠唤醒时，不遗留 Hog Mode 或被修改的设备格式；
+6. 待补：卸载或禁用 Hi-Fi 后，普通 PCM 界面不显示设备入口且继续走系统默认设备。
 
 建议下一步顺序：
 
-1. 实现 DSD → PCM fallback 以及 Automatic / Prefer DoP / Always PCM；
-2. 用真实设备回归 DSD128；环绕 5.0/5.1/7.1 DoP 等具备相应 DAC 后再做；
-3. 补 DSF/DFF 专项 metadata、设置和真正可恢复 Session；
-4. DST 与 SACD 多声道；
-5. 最后评估 Engine Service/XPC 和正式 Release 安装、升级、签名流程。
+1. 按第 9.1 节完成通用输出设备选择的真实 DAC 验收；
+2. 实现 DSD → PCM fallback 以及 Automatic / Prefer DoP / Always PCM；
+3. 用真实设备回归 DSD128；环绕 5.0/5.1/7.1 DoP 等具备相应 DAC 后再做；
+4. 补 DSF/DFF 专项 metadata、设置和真正可恢复 Session；
+5. DST 与 SACD 多声道；
+6. 最后评估 Engine Service/XPC 和正式 Release 安装、升级、签名流程。
 
 Phase 1 的验收不是 parser 能读 DFF，而是 DSF/DFF 能从 Finder、拖放和混合列表进入同一宿主体验；DoP 不可用时自动 PCM；Seek、切歌、设备切换和恢复不会遗留设备状态。
 

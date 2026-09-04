@@ -29,6 +29,8 @@ public struct HiFiAudioOutputDevice: Codable, Equatable, Identifiable, Sendable 
     public let availablePhysicalFormats: [HiFiAudioPhysicalFormat]
     /// 仅表示物理 PCM 格式可承载 DoP，尚未经过 HAL 打开和 marker 验证。
     public let potentialDoPDSDRates: [Int]
+    public let supportsExclusiveMode: Bool
+    public let supportedPCMSampleRates: [Double]
 }
 
 public enum CoreAudioDeviceCatalogError: Error, Equatable, Sendable {
@@ -66,7 +68,9 @@ public enum CoreAudioDeviceCatalog {
                 currentPhysicalFormats: normalized(currentFormats),
                 currentVirtualFormats: normalized(currentVirtualFormats),
                 availablePhysicalFormats: normalized(availableFormats),
-                potentialDoPDSDRates: potentialDoPDSDRates(from: availableFormats)
+                potentialDoPDSDRates: potentialDoPDSDRates(from: availableFormats),
+                supportsExclusiveMode: CoreAudioHALFormatProbe.supportsHogMode(deviceID: deviceID),
+                supportedPCMSampleRates: supportedPCMSampleRates(from: availableFormats)
             )
         }
         .sorted {
@@ -88,6 +92,21 @@ public enum CoreAudioDeviceCatalog {
                     && $0.minimumSampleRate <= candidate.pcm
                     && candidate.pcm <= $0.maximumSampleRate
             } ? candidate.dsd : nil
+        }
+    }
+
+    static func supportedPCMSampleRates(from formats: [HiFiAudioPhysicalFormat]) -> [Double] {
+        let commonRates: [Double] = [
+            8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000,
+            44_100, 48_000, 88_200, 96_000, 176_400, 192_000,
+            352_800, 384_000, 705_600, 768_000
+        ]
+        return commonRates.filter { rate in
+            formats.contains {
+                $0.isLinearPCM
+                    && $0.minimumSampleRate <= rate
+                    && rate <= $0.maximumSampleRate
+            }
         }
     }
 

@@ -341,6 +341,18 @@ public enum CoreAudioHALFormatProbe {
         throw CoreAudioHALFormatProbeError.hogModeAcquireFailed
     }
 
+    static func supportsHogMode(deviceID: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyHogMode,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var settable = DarwinBoolean(false)
+        return AudioObjectHasProperty(deviceID, &address)
+            && AudioObjectIsPropertySettable(deviceID, &address, &settable) == noErr
+            && settable.boolValue
+    }
+
     static func isDeviceAlive(_ deviceID: AudioDeviceID) -> Bool {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceIsAlive,
@@ -450,7 +462,7 @@ public enum CoreAudioHALFormatProbe {
         return streams
     }
 
-    private static func availableFormats(streamID: AudioStreamID) throws -> [AudioStreamRangedDescription] {
+    static func availableFormats(streamID: AudioStreamID) throws -> [AudioStreamRangedDescription] {
         var address = physicalFormatAddress(selector: kAudioStreamPropertyAvailablePhysicalFormats)
         var dataSize: UInt32 = 0
         var status = AudioObjectGetPropertyDataSize(streamID, &address, 0, nil, &dataSize)
@@ -569,7 +581,7 @@ public enum CoreAudioHALFormatProbe {
         )
     }
 
-    private static func matches(
+    static func matches(
         _ lhs: AudioStreamBasicDescription,
         _ rhs: AudioStreamBasicDescription
     ) -> Bool {

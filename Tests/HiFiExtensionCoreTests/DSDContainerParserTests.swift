@@ -96,6 +96,15 @@ struct DSDContainerParserTests {
         #expect(CoreAudioDeviceCatalog.potentialDoPDSDRates(from: formats) == [2_822_400, 5_644_800])
     }
 
+    @Test func enumeratesCommonPCMRatesFromDeviceRanges() {
+        let formats = [
+            physicalFormat(rate: 44_100, bits: 24),
+            physicalFormat(rate: 96_000, bits: 32)
+        ]
+
+        #expect(CoreAudioDeviceCatalog.supportedPCMSampleRates(from: formats) == [44_100, 96_000])
+    }
+
     @Test func doPEncoderAlternatesMarkersAcrossChunks() throws {
         var encoder = DoPFrameEncoder()
         let first = try encoder.encode(dsdBytesByChannel: [
