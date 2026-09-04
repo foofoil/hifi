@@ -1,8 +1,8 @@
 # Hi-Fi 阶段性交接：DSF / DoP 与统一音频体验
 
-> 更新日期：2026-09-03
+> 更新日期：2026-09-04
 >
-> 当前里程碑：Stereo DSD64 DSF/DFF 已在 SMSL DAC 上实机播放；5.0 DFF 在立体声 DAC 上走 MLFT/MRGT 折混，设备提供 5/6/8 声道 DoP 格式时按 5.0/5.1/7.1 输出。未压缩立体声 SACD ISO（3-in-14）已在同一 SMSL 上实机播放：CUE 式曲目列表、Seek、DoP 出声均已确认。DAC 释放屏障与切歌播放意图已提交。设备断开/占用/Hog/睡眠恢复已实现，**仍待真实 DAC 手测**（见第 4.2 节）。DST / SACD 多声道仍未做。
+> 当前里程碑：Stereo DSD64 DSF/DFF 已在 SMSL DAC 上实机播放；DSD256 已通过真实硬件验证，DSD128 仍待回归。5.0 DFF 在立体声 DAC 上走 MLFT/MRGT 折混，设备提供 5/6/8 声道 DoP 格式时按 5.0/5.1/7.1 输出；因暂无环绕 DoP DAC，多声道输出实测暂缓。未压缩立体声 SACD ISO（3-in-14）已在同一 SMSL 上实机播放：CUE 式曲目列表、Seek、DoP 出声及自然续播均已确认。DAC 释放屏障与切歌播放意图已提交；设备断开/占用/Hog/睡眠恢复也已通过真实 DAC 手测。DST / SACD 多声道仍未做。
 >
 > 用途：新会话中的 agent 应先读本文，再读 `foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md`，保留三个仓库的现有改动并从第 9 节继续。
 
@@ -44,7 +44,7 @@ foofoil/
 - 容器：DSF、raw DFF，以及未压缩立体声 SACD ISO（DST 压缩 DFF/ISO 仍拒绝）；
 - 编码：raw DSD；
 - 声道：立体声已实测；5.0 DFF 按设备能力输出 5ch / 5.1（补静音 LFE）/ 7.1 或折成立体声对；
-- 已实测：DSD64 / 2.8224 MHz，DSF 立体声与 DFF 立体声（SMSL）；5.0 DFF 在 SMSL 上为立体声折混；
+- 已实测：DSD64 / 2.8224 MHz 的 DSF 立体声与 DFF 立体声（SMSL），以及 DSD256 / 11.2896 MHz；5.0 DFF 在 SMSL 上为立体声折混；
 - 输出：DoP，经 CoreAudio HAL 和 Hog Mode 输出到 USB DAC；
 - 操作：播放、暂停、Seek、播完续播、单曲循环、顺序/顺序循环/随机、上一项/下一项和设备选择；
 - 宿主一致性：普通音频与 DSD 可混合进入同一列表，支持追加、删除、拖拽重排、时长 badge、当前项动态图标、鼠标 hover、空格键、列表键盘操作和系统媒体键；
@@ -56,9 +56,8 @@ foofoil/
 
 - DSD → PCM fallback；
 - DST DFF 或 SACD 多声道 / DST ISO 播放；
-- DSD128 / DSD256 的真实硬件回归；
-- 5.0/5.1/7.1 DoP 在环绕 DAC 上的真实硬件回归（代码已按格式探测选择，SMSL 上仍走立体声折混）；
-- 设备断开/占用/Hog/睡眠恢复的真实 DAC 手测（代码已落地，见第 4.2 节）；
+- DSD128 的真实硬件回归（DSD256 已通过）；
+- 5.0/5.1/7.1 DoP 在环绕 DAC 上的真实硬件回归（代码已按格式探测选择，SMSL 上仍走立体声折混；因暂无相应设备暂缓）；
 - DSF 内嵌 metadata 的专项 parser；当前主要复用宿主通用 metadata/封面能力；
 - 完整的 Session 恢复；
 - Release 插件安装/升级验收；
@@ -87,7 +86,7 @@ SACD ISO ─────┘                         └→ activate 当前 URL /
 5. 列表上一项/下一项优先执行宿主 navigator；只有没有宿主列表时才回退扩展旧队列；
 6. 播放结束先按宿主播放模式推进当前项，单曲循环才直接重播当前 Hi-Fi Session。
 
-## 4. 已提交修复与待手测项
+## 4. 已提交修复与硬件验证
 
 ### 4.1 DAC 释放屏障（已提交，手测通过）
 
@@ -95,9 +94,9 @@ SACD ISO ─────┘                         └→ activate 当前 URL /
 
 切歌播放/暂停意图：`foofoil` `4f5ae49`。暂停后切歌保持暂停，播放中切歌立即起播；自然播完仍自动续播。
 
-### 4.2 设备恢复与结构化错误（代码已落地，待真实 DAC 手测）
+### 4.2 设备恢复与结构化错误（真实 DAC 手测已通过）
 
-用户将稍后手测，不要当作已硬件验收：
+以下场景已于 2026-09-04 使用真实 DAC 完成验收：
 
 1. 播放中拔掉 USB DAC → 约 1 秒内显示「输出设备已断开」，DAC 不得留在 DSD64 / 176.4 kHz；
 2. 播放中睡眠再唤醒 → 保持暂停，DAC 回到普通 PCM，点播放仍能进 DSD；
@@ -114,7 +113,7 @@ SACD ISO ─────┘                         └→ activate 当前 URL /
 - 右上角状态会标明 `5ch · DoP`、`5.0→5.1 · DoP` 或 `5ch→Stereo · DoP`；
 - DST 压缩 DFF 仍然不可播放。
 
-### 4.4 未压缩立体声 SACD ISO（列表、Seek、出声已手测）
+### 4.4 未压缩立体声 SACD ISO（列表、Seek、出声、自然续播已手测）
 
 实测盘：Gunter Wand / NDR《Beethoven Symphonies Nos.2 & 6》ISO（TWOCHTOC only，3-in-14，9 曲，约 3.1 GB）。输出仍是 SMSL USB AUDIO DSD64 DoP。
 
@@ -132,7 +131,7 @@ SACD ISO ─────┘                         └→ activate 当前 URL /
 - 帧布局与 DFF 相同：逐字节 LRLR、MSB-first。不要按 16-bit 字交错拆；
 - Seek：按约 14 扇区 / 3 帧落到附近 LSN，再靠 `frame_start` 对齐；`HALDSFPlaybackEngine.play` 在 Hog 之前 seek 流；
 - 曲目文字块前常见 `02 00 00 00`（条目数，小端），然后才是 type + C 字符串；跳过该头才能读到 `Sinfonie Nr.2 …` 而不是退回 `Track 1`；
-- SACD 自然播完由宿主列表切到下一曲。Runtime 在切项时若上一曲已到结尾，必须继续 `play`：播完时 `playingSessionID` 已清空，不能只看「当前是否在播」。暂停后再点下一曲仍保持暂停。此续播路径刚落地，**待用户再听两曲确认**。
+- SACD 自然播完由宿主列表切到下一曲。Runtime 在切项时若上一曲已到结尾，必须继续 `play`：播完时 `playingSessionID` 已清空，不能只看「当前是否在播」。暂停后再点下一曲仍保持暂停。此续播路径已通过连续两曲实听确认。
 
 不要把下列情况当成已验收：DST ISO、SACD 多声道、普通 `.iso`。
 
@@ -187,7 +186,13 @@ DFF 补充：
 SACD ISO 补充：
 
 - 未压缩立体声 3-in-14 ISO 已在同一 SMSL 上播放；Seek 与列表已确认；
+- SACD 曲目自然结束后自动续播下一曲已通过连续两曲实听；
 - 不要把 DST 或多声道 ISO 当成同一验收。
+
+采样率补充：
+
+- DSD256 已通过真实硬件播放验证；
+- DSD128 尚未完成真实硬件回归，不要据此推定为已验收。
 
 ## 7. 代码地图
 
@@ -240,18 +245,17 @@ HAL callback 禁止文件 I/O、锁、内存分配、JSON、日志或 Swift coll
 - `hifi` `9b09bce`：raw DFF、5.0 输出布局、设备恢复、未压缩立体声 SACD ISO 出流；
 - `extension-kit` `1c3c923`：`MediaPlaybackQueueSnapshot.title` 供容器专辑标题使用；旧 queue JSON 仍可解码；
 - `foofoil` 已提交 DAC 释放屏障 `666e149`、切歌播放意图 `4f5ae49` 与 seek-on-release `0f77844`；ISO sniff、CUE 式曲目列表（曲名 + 左侧序号）与 Session 复用见 `9782820`；
-- 第 4.1 节切换手测已通过；第 4.3 节立体声 DFF 与 5.0 折混已通过；第 4.4 节 SACD ISO 列表/Seek/出声已通过；第 4.2 节设备恢复手测尚未做；SACD 自然续播刚修，待再听两曲；
+- 第 4.1 节切换手测、第 4.2 节设备恢复手测均已通过；第 4.3 节立体声 DFF 与 5.0 折混已通过；第 4.4 节 SACD ISO 列表/Seek/出声及自然续播已通过；
+- DSD256 已通过真实硬件验证，DSD128 仍待回归；环绕 5.0/5.1/7.1 DoP 因暂无相应 DAC 暂缓；
 - 核心测试以 `swift test` 为准；本地 ISO 存在时 `SACDISOParserTests` 会对照同专辑 DSF 前 16384 字节。
 
 建议下一步顺序：
 
-1. 用户再听 SACD 两曲，确认自然播完会自动起播下一曲；
-2. 用户完成第 4.2 节真实 DAC 设备恢复手测；
-3. 有环绕 DoP DAC 时回归 5.0/5.1 输出；用真实设备回归 DSD128 / DSD256；
-4. 实现 DSD → PCM fallback 以及 Automatic / Prefer DoP / Always PCM；
-5. 补 DSF/DFF 专项 metadata、设置和真正可恢复 Session；
-6. DST 与 SACD 多声道；
-7. 最后评估 Engine Service/XPC 和正式 Release 安装、升级、签名流程。
+1. 实现 DSD → PCM fallback 以及 Automatic / Prefer DoP / Always PCM；
+2. 用真实设备回归 DSD128；环绕 5.0/5.1/7.1 DoP 等具备相应 DAC 后再做；
+3. 补 DSF/DFF 专项 metadata、设置和真正可恢复 Session；
+4. DST 与 SACD 多声道；
+5. 最后评估 Engine Service/XPC 和正式 Release 安装、升级、签名流程。
 
 Phase 1 的验收不是 parser 能读 DFF，而是 DSF/DFF 能从 Finder、拖放和混合列表进入同一宿主体验；DoP 不可用时自动 PCM；Seek、切歌、设备切换和恢复不会遗留设备状态。
 
@@ -260,7 +264,7 @@ Phase 1 的验收不是 parser 能读 DFF，而是 DSF/DFF 能从 Finder、拖�
 1. 分别读取 `hifi/AGENTS.md`、本文和总技术方案；如修改其它仓库，再读对应 `AGENTS.md`；
 2. 在 `hifi`、`foofoil`、`extension-kit` 分别执行 `git status --short`，保留全部现有修改；
 3. 先运行 Hi-Fi 核心测试、ExtensionKit 测试和 `foofoil/run` 建立基线；
-4. 第 4.2 节设备恢复手测未完成前，不要改 encoder、bit order 或 Hog 释放顺序；
+4. 第 4.2 节设备恢复手测已经通过；修改 encoder、bit order 或 Hog 释放顺序时仍须补回归测试；
 5. 不要重新猜测 176.4 kHz 来源，也不要重做已通过的 DoP silence/Hog Mode spike；
 6. 修改 encoder、DSF bit order、physical/virtual format 或 callback layout 前，先阅读第 5、6、8 节并补回归测试；
 7. 不要把外部 DSF 列表重新塞回 Hi-Fi `fileCollection` queue；

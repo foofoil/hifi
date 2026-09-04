@@ -1,6 +1,6 @@
 # foofoil Hi-Fi 插件：DSF / DFF / SACD ISO 技术方案
 
-> 文档状态：2026-09-03 按三个独立仓库的现行实现校准（v2）。`foofoil` 是宿主应用，`extension-kit` 是稳定扩展契约，`hifi` 是独立第一方扩展。
+> 文档状态：2026-09-04 按三个独立仓库的现行实现与硬件验收结果校准（v2）。`foofoil` 是宿主应用，`extension-kit` 是稳定扩展契约，`hifi` 是独立第一方扩展。
 >
 > 核心结论：DSF、DFF、SACD ISO、DST、DoP、DSD → PCM、专业设备路由等高级音频能力不进入 foofoil Core，而由第一方可选组件 **Hi-Fi** 提供；SACD ISO 等多曲目内容使用 foofoil 现有列表界面呈现，不在插件中另造曲目列表 UI。
 
@@ -723,23 +723,24 @@ ContentRequest
 
 同时验证宿主统一音频列表：普通音频和 DSF 使用同一 `FileListState` / `NavigatorContribution`，每次选择后再路由解码器。Runtime 的旧 `fileCollection` 队列保留兼容，但不是外部文件列表的主路径。
 
-截至 2026-09-03 的验收结果：
+截至 2026-09-04 的验收结果：
 
 1. Provider 可由 Debug bundle 装载、匹配 `.dsf` 并建立 Session；
 2. 进程内 Runtime 的文件授权、HAL 访问和 C ABI 消息链路成立；
 3. Stereo raw DSF 可稳定读取、播放、暂停和 Seek；
-4. 参考 SMSL DAC 已正确识别并播放 DSD64；DSD128/256 尚待真实硬件回归；
+4. 参考 DAC 已正确识别并播放 DSD64；DSD256 也已通过真实硬件验证，DSD128 尚待回归；
 5. 普通音频与 DSF 的统一列表、拖拽排序、动态图标、键盘/媒体键和播放模式已成立；
 6. 封面、metadata 外壳、播放控件和技术信息复用宿主 UI，没有插件自定义列表；
 7. 关闭 Session 会恢复设备格式并释放 Hog Mode；切换 Provider 前宿主等待释放完成；
 8. DST、PCM fallback、Engine Service 与正式 Release 安装仍属后续工作；
 9. raw DFF 已接通 DoP/HAL：立体声 DFF DSD64 已在 SMSL 上验收；5.0 DFF 按设备格式走 5ch / 5.1 / 7.1 或立体声折混；
-10. 设备断开/占用/Hog/睡眠恢复代码已落地，待真实 DAC 手测；
-11. 未压缩立体声 SACD ISO（3-in-14）已接通 sniff、CUE 式宿主列表、Seek 与 DoP 出流，并在 SMSL 上对 Wand 贝多芬 ISO 确认出声；DST / 多声道仍未做。
+10. 设备断开/占用/Hog/睡眠恢复已通过真实 DAC 手测；
+11. 未压缩立体声 SACD ISO（3-in-14）已接通 sniff、CUE 式宿主列表、Seek 与 DoP 出流，并在 SMSL 上对 Wand 贝多芬 ISO 确认出声；自然结束后自动续播下一曲也已通过连续两曲实听；DST / 多声道仍未做；
+12. 5.0/5.1/7.1 DoP 输出因暂无环绕 DoP DAC，真实硬件验收暂缓。
 
 ### Phase 1：DSF / DFF 可发布版本
 
-在现有 DSF/DoP 闭环上完成 DSD128/256 回归、raw DFF Reader、DST、PCM fallback、设备变化恢复、DSF/DFF 专项 metadata、Session 恢复、设置、本地化和正式插件安装。外部多文件顺序继续由宿主列表负责，不在 Hi-Fi 内重建一套队列。
+在现有 DSF/DoP 闭环上完成 DSD128 回归、raw DFF Reader、DST、PCM fallback、设备变化恢复、DSF/DFF 专项 metadata、Session 恢复、设置、本地化和正式插件安装。DSD256 与设备变化恢复已经通过真实硬件验收。外部多文件顺序继续由宿主列表负责，不在 Hi-Fi 内重建一套队列。
 
 验收：用户双击、拖入或批量打开 DSF/DFF 时，行为与 foofoil 其他内容一致；列表、菜单和快捷键使用宿主能力；未安装插件时能从应用内安装并继续打开。
 
@@ -813,13 +814,11 @@ Hi-Fi 与 foofoil 独立发版。队列、Track ID 和设置状态需要 schema 
 
 ## 21. 建议下一步
 
-Phase 0 的 DSF/DoP 与统一列表 Spike 已打通。raw DFF 立体声已实机验收；未压缩立体声 SACD ISO 已在 SMSL 上出声。5.0 输出随 DAC 能力选择；拔插/占用/睡眠仍待真实 DAC 手测。下一步按风险排序：
+Phase 0 的 DSF/DoP 与统一列表 Spike 已打通。raw DFF 立体声、DSD256、设备断开/占用/Hog/睡眠恢复均已通过真实硬件验收；未压缩立体声 SACD ISO 已在 SMSL 上出声，曲目自然续播也已通过连续两曲实听。5.0 输出随 DAC 能力选择，但因暂无环绕 DoP DAC，真实多声道验收暂缓。下一步按风险排序：
 
-1. 确认 SACD 自然播完会自动起播下一曲；
-2. 用真实 DAC 验收断开、占用、Hog 失败和睡眠唤醒；
-3. 有环绕 DoP DAC 时回归 5.0/5.1；完成 DSD128/256 硬件矩阵；
-4. 实现 DSD → PCM fallback 与 Automatic / Prefer DoP / Always PCM 策略；
-5. 再加入 DST、SACD 多声道、专项 metadata、Session 恢复和正式发布流程。
+1. 实现 DSD → PCM fallback 与 Automatic / Prefer DoP / Always PCM 策略；
+2. 完成 DSD128 硬件回归；有环绕 DoP DAC 后再回归 5.0/5.1/7.1；
+3. 再加入 DST、SACD 多声道、专项 metadata、Session 恢复和正式发布流程。
 
 ---
 
