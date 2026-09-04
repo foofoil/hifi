@@ -414,6 +414,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
         lock.unlock()
 
+        // 每次命令前用系统最新设备列表刷新会话，避免独占设备离线后菜单与状态卡在已不存在的设备上。
+        refreshDeviceSelection(for: record, session: &session)
+
         switch commandID {
         case "hifi.play":
             do {
@@ -546,6 +549,91 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         trackedRecord.underrunCount = status.underrunCount
         trackedRecord.playbackState = "paused"
         trackedRecord.failureDescription = status.failureDescription
+    }
+
+    /// 设备插拔后立刻刷新会话内的设备列表；当前独占设备离线时暂停并回退到兼容的系统默认设备，
+    /// 若没有任何可支持当前 DSD 速率的设备则置为失败，宿主据此给出警告且无法播放。
+    private func refreshDeviceSelection(for record: RuntimeSession, session: inout [String: Any]) {
+        guard let freshDevices = try? CoreAudioDeviceCatalog.outputDevices() else { return }
+        guard var selection = session["audioDeviceSelection"] as? [String: Any],
+              var commands = session["commands"] as? [[String: Any]] else { return }
+        let sampleRate = record.sampleRate
+        let deviceObjects: [[String: Any]] = freshDevices.map {
+            [
+                "id": $0.id,
+                "displayName": $0.displayName,
+                "isSystemDefault": $0.isSystemDefault,
+                "isConnected": $0.isConnected,
+                "hasHardwareVolume": $0.hasHardwareVolume,
+                "supportedDoPRates": $0.potentialDoPDSDRates
+            ]
+        }
+        let compatible = freshDevices.filter { $0.isConnected && $0.potentialDoPDSDRates.contains(sampleRate) }
+        let currentID = record.selectedDeviceID
+        let currentStillUsable = currentID.flatMap { id in
+            freshDevices.first(where: { $0.id == id })
+        }.map { $0.isConnected && $0.potentialDoPDSDRates.contains(sampleRate) } ?? false
+
+        if !currentStillUsable {
+            lock.lock()
+            let wasPlaying = playingSessionID == record.id
+            lock.unlock()
+            if wasPlaying {
+                if let status = try? player.stop() {
+                    record.samplePosition = status.samplePosition
+                    record.underrunCount = status.underrunCount
+                }
+                lock.lock()
+                playingSessionID = nil
+                lock.unlock()
+            }
+            if let fallback = compatible.first(where: \.isSystemDefault) ?? compatible.first {
+                record.selectedDeviceID = fallback.id
+                // 离线后切换为跟随系统默认兼容设备时必须暂停，由用户决定是否继续播放。
+                record.playbackState = "paused"
+                record.failureDescription = nil
+            } else {
+                record.selectedDeviceID = nil
+                // 没有任何可支持设备时给出明确失败，宿主显示警告且播放命令会被禁用。
+                if wasPlaying || record.playbackState == "playing" || currentID != nil {
+                    record.playbackState = "failed"
+                    record.failureDescription = HiFiPlaybackError.unsupportedDoPRate.localizationKey
+                }
+            }
+        }
+
+        selection["devices"] = deviceObjects
+        if let selectedID = record.selectedDeviceID,
+           freshDevices.contains(where: { $0.id == selectedID }) {
+            selection["selectedDeviceID"] = selectedID
+            selection["statusDescription"] = freshDevices.first(where: { $0.id == selectedID })?.displayName ?? selectedID
+        } else {
+            selection.removeValue(forKey: "selectedDeviceID")
+            // 无可用设备时不虚构状态描述，宿主靠 mediaPlayback.failed 显示本地化警告。
+            selection.removeValue(forKey: "statusDescription")
+        }
+        selection["revision"] = ((selection["revision"] as? NSNumber)?.uint64Value ?? 0) + 1
+        // 保留非设备命令，重建设备子命令以反映插拔后的最新列表。
+        let kept = commands.filter { ($0["id"] as? String)?.hasPrefix("hifi.device.") != true }
+        var rebuilt = kept
+        for device in freshDevices {
+            rebuilt.append([
+                "id": "hifi.device.\(device.id)",
+                "titleLocalizationKey": "",
+                "displayTitle": device.displayName,
+                "parentID": "hifi.output-device",
+                "modifierFlags": 0,
+                "isEnabled": device.isConnected && device.potentialDoPDSDRates.contains(sampleRate),
+                "isChecked": device.id == record.selectedDeviceID
+            ])
+        }
+        if let outputIndex = rebuilt.firstIndex(where: { ($0["id"] as? String) == "hifi.output-device" }) {
+            var output = rebuilt[outputIndex]
+            output["isEnabled"] = !freshDevices.isEmpty
+            rebuilt[outputIndex] = output
+        }
+        session["audioDeviceSelection"] = selection
+        session["commands"] = rebuilt
     }
 
     private func selectDevice(
@@ -972,13 +1060,43 @@ private final class AudioDeviceServiceController: @unchecked Sendable {
         } else {
             devices = cachedDevices ?? []
         }
+        // 独占设备离线后立刻释放 lease 并切回跟随系统默认，避免快照长期指向已不存在的设备。
+        var preferredUID = UserDefaults.standard.string(forKey: preferenceKey)
+        if let uid = preferredUID,
+           devices.first(where: { $0.id == uid && $0.isConnected }) == nil {
+            releasePCM()
+            UserDefaults.standard.removeObject(forKey: preferenceKey)
+            preferredUID = nil
+            lock.lock()
+            self.cachedDevices = devices
+            revision &+= 1
+            lock.unlock()
+        }
         lock.lock()
         let activeLease = lease
         let clientID = activeClientID
-        let currentRevision = revision
         lock.unlock()
-        let preferredUID = UserDefaults.standard.string(forKey: preferenceKey)
-        let activeStatus = try? activeLease?.refreshStatus()
+        if let activeLease,
+           devices.first(where: { $0.id == activeLease.status.deviceUID && $0.isConnected }) == nil {
+            releasePCM()
+        }
+        lock.lock()
+        let validatedLease = lease
+        let validatedClientID = activeClientID
+        lock.unlock()
+        let activeStatus = try? validatedLease?.refreshStatus()
+        // lease 指向的设备已消失时 refreshStatus 可能仍返回旧值，此时不再对外暴露独占状态。
+        let activeDeviceStillPresent = activeStatus.flatMap { status in
+            devices.first(where: { $0.id == status.deviceUID && $0.isConnected })
+        } != nil
+        let effectiveClientID = activeDeviceStillPresent ? (validatedClientID ?? clientID) : nil
+        if !activeDeviceStillPresent, validatedLease != nil {
+            releasePCM()
+            if preferredUID != nil {
+                UserDefaults.standard.removeObject(forKey: preferenceKey)
+                preferredUID = nil
+            }
+        }
         let deviceObjects: [[String: Any]] = devices.map {
             [
                 "id": $0.id,
@@ -991,15 +1109,22 @@ private final class AudioDeviceServiceController: @unchecked Sendable {
                 "supportedPCMSampleRates": $0.supportedPCMSampleRates
             ]
         }
+        lock.lock()
+        let finalRevision = revision
+        lock.unlock()
+        // 离线后强制回退为跟随系统默认，不再对外暴露已不存在的独占设备。
+        let effectivePreferredUID: String? = preferredUID.flatMap { uid in
+            devices.first(where: { $0.id == uid && $0.isConnected }) != nil ? uid : nil
+        }
         var result: [String: Any] = [
             "contractVersion": 1,
             "devices": deviceObjects,
-            "pcmRouteMode": preferredUID == nil ? "systemDefault" : "exclusiveDevice",
-            "revision": currentRevision
+            "pcmRouteMode": effectivePreferredUID == nil ? "systemDefault" : "exclusiveDevice",
+            "revision": finalRevision
         ]
-        if let preferredUID { result["selectedPCMDeviceID"] = preferredUID }
-        if let clientID { result["activeClientID"] = clientID.uuidString }
-        if let activeStatus {
+        if let effectivePreferredUID { result["selectedPCMDeviceID"] = effectivePreferredUID }
+        if let effectiveClientID { result["activeClientID"] = effectiveClientID.uuidString }
+        if let activeStatus, activeDeviceStillPresent {
             result["activeDeviceID"] = activeStatus.deviceUID
             result["activeSampleRate"] = activeStatus.activeSampleRate
             result["sourceSampleRate"] = activeStatus.sourceSampleRate
