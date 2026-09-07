@@ -128,7 +128,7 @@ SACD ISO ─────┘                         └→ activate 当前 URL /
 - 帧布局与 DFF 相同：逐字节 LRLR、MSB-first。不要按 16-bit 字交错拆；
 - Seek：按约 14 扇区 / 3 帧落到附近 LSN，再靠 `frame_start` 对齐；`HALDSFPlaybackEngine.play` 在 Hog 之前 seek 流；
 - 曲目文字块前常见 `02 00 00 00`（条目数，小端），然后才是 type + C 字符串；跳过该头才能读到 `Sinfonie Nr.2 …` 而不是退回 `Track 1`；
-- SACD 自然播完由宿主列表切到下一曲。Runtime 在切项时若上一曲已到结尾，必须继续 `play`：播完时 `playingSessionID` 已清空，不能只看「当前是否在播」。暂停后再点下一曲仍保持暂停。此续播路径已通过连续两曲实听确认。
+- SACD 自然播完由宿主列表切到下一曲。Runtime 在切项时若上一曲已到结尾，必须继续 `play`：播完时会话的活动标记已清除（旧实现为 `playingSessionID`，现为 `isActive`），不能只看「当前是否在播」。暂停后再点下一曲仍保持暂停。此续播路径已通过连续两曲实听确认。
 
 不要把下列情况当成已验收：DST ISO、SACD 多声道、普通 `.iso`。
 
@@ -205,7 +205,7 @@ SACD ISO 补充：
 - `Sources/HiFiExtensionCore/SPSCFloatRingBuffer.swift`：实时线程固定容量 ring；
 - `Sources/HiFiExtensionCore/CoreAudioDeviceCatalog.swift`、`CoreAudioHALFormatProbe.swift`：设备、格式、Hog Mode 和诊断；`plan` 按精确声道数匹配 DoP carrier；
 - `Sources/HiFiExtensionCore/HALDSFPlaybackEngine.swift`：worker、预缓冲、IOProc、停止和设备恢复；按 `playbackOutputMaps()` 选择输出布局；
-- `Sources/HiFiExtensionRuntime/Runtime.swift`：C ABI Runtime、进程级播放器仲裁、命令与设备状态；
+- `Sources/HiFiExtensionRuntime/Runtime.swift`：C ABI Runtime、按设备 UID 的播放器仲裁、命令与设备状态；
 - `Sources/HiFiInspect`、`HiFiHALProbe`、`HiFiRuntimeSmoke`：诊断 CLI；
 - `Tests/HiFiExtensionCoreTests`：核心测试（含错误码与 DFF 流）。
 
@@ -240,7 +240,7 @@ HAL callback 禁止文件 I/O、锁、内存分配、JSON、日志或 Swift coll
 2026-09-07 产品决策：DSD 仅通过 DoP 输出，不实现 DSD → PCM fallback，也不提供 Automatic / Prefer DoP / Always PCM 策略。这是范围排除，不是待办。无兼容设备、设备被占用或初始化失败时停止并说明原因；曲目和封面仍可展示，播放时显示实际 DoP 模式、倍率和设备。普通 PCM 的设备选择与系统默认回退保持独立。Runtime 的 `outputPolicy: "automatic"` 是遗留字段，待另行调整代码，不代表已实现转换。
 
 
-2026-09-07 Session 进度恢复增补（本轮工作区改动，尚未提交）：
+2026-09-07 Session 进度恢复增补（宿主 `9e7f752`、Hi-Fi `d1fedb7` 已提交）：
 
 - 宿主用新建的 Hi-Fi Session 依次恢复保存的容器 Track ID 和播放位置，完成后才交给视图；历史重开保持暂停，不自动起播，也不主动释放另一窗口的 PCM 独占 lease。
 - 进度以新曲目时长为上限；忽略非有限数值和负值。旧 Track ID 不存在或不可播放时，不把其进度套到第一曲。
@@ -248,7 +248,7 @@ HAL callback 禁止文件 I/O、锁、内存分配、JSON、日志或 Swift coll
 - Runtime 对未持有播放器的会话执行 pause 时保留自身位置，不停止另一会话；覆盖恢复后尚未起播时重复暂停的路径。
 - 验证：宿主全量 `xcodebuild test`、Hi-Fi 33 项核心测试、ExtensionKit 8 项契约测试及 Runtime `--self-test` 均通过；已通过宿主 `./run` 构建、注入插件并启动。
 - 用户已确认本轮 Session 恢复实测无问题（2026-09-07），历史重开、曲目及播放位置恢复验收通过。
-- 多个箔争用独占设备仍存在问题，待定位和修复；用户报告其他已测场景未发现问题。记住上次选择的 DAC 仍未完成。已有音频资源的 metadata 未发现问题，不再列专项 metadata 待办。
+- 多个箔争用独占设备已完成按 UID 仲裁修复并提交，自动化通过，待实机回归（见第 9.1 节）；用户此前报告其他已测场景未发现问题。记住上次选择的 DAC 仍未完成。已有音频资源的 metadata 未发现问题，不再列专项 metadata 待办。
 
 2026-09-07 历史记录恢复修复（宿主 `8b91e2c` 已提交）：
 
@@ -273,6 +273,8 @@ HAL callback 禁止文件 I/O、锁、内存分配、JSON、日志或 Swift coll
 - 核心测试以 `swift test` 为准；本地 ISO 存在时 `SACDISOParserTests` 会对照同专辑 DSF 前 16384 字节。
 
 ### 9.1 通用输出设备选择验收与已知问题
+
+当前进度（2026-09-07）：宿主 `7d6576d`、Hi-Fi `8ba3210` 已提交跨箔独占交接修复。代码实现、自动化验证、构建及 Debug 插件注入已完成；本轮实机交接验收尚未收到确认。
 
 2026-09-07 用户反馈：多个箔之间争用独占设备存在问题，其余已测场景未发现问题。本条不推定未提供素材或设备的全部组合均已覆盖。
 
