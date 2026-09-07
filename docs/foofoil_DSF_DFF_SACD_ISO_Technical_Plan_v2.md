@@ -491,7 +491,7 @@ protocol DSDStream {
 
 ### 11.1 DSF
 
-读取 `DSD `、`fmt `、`data` chunk，获得 channel count、sample rate、sample count、block size，并读取 ID3 metadata 与封面。第一版覆盖 DSD64、DSD128、DSD256 与 Stereo。
+读取 `DSD `、`fmt `、`data` chunk，获得 channel count、sample rate、sample count、block size，并复用现有 metadata 与封面能力；已有资源未发现问题，不新增专项解析待办。第一版覆盖 DSD64、DSD128、DSD256 与 Stereo。
 
 Seek 使用 sample、block size 和 channel layout 建立偏移映射；Seek 后重建 DoP marker phase。DSF 较简单，优先评估小型本地实现或窄范围复用，不为它引入完整媒体框架。
 
@@ -721,7 +721,7 @@ ContentRequest
 1. Provider 可由 Debug bundle 装载、匹配 `.dsf` 并建立 Session；
 2. 进程内 Runtime 的文件授权、HAL 访问和 C ABI 消息链路成立；
 3. Stereo raw DSF 可稳定读取、播放、暂停和 Seek；
-4. 参考 DAC 已正确识别并播放 DSD64；DSD256 也已通过真实硬件验证，DSD128 尚待回归；
+4. 参考 DAC 已正确识别并播放 DSD64；DSD128 / DSD256 也已通过真实硬件验证；
 5. 普通音频与 DSF 的统一列表、拖拽排序、动态图标、键盘/媒体键和播放模式已成立；
 6. 封面、metadata 外壳、播放控件和技术信息复用宿主 UI，没有插件自定义列表；
 7. 关闭 Session 会恢复设备格式并释放 Hog Mode；切换 Provider 前宿主等待释放完成；
@@ -733,13 +733,13 @@ ContentRequest
 
 ### Phase 1：DSF / DFF 可发布版本
 
-在现有 DSF/DoP 闭环上完成 DSD128 回归、raw DFF Reader、DST、设备变化恢复、DSF/DFF 专项 metadata、Session 恢复、设置、本地化和正式插件安装。DSD256 与设备变化恢复已经通过真实硬件验收。外部多文件顺序继续由宿主列表负责，不在 Hi-Fi 内重建一套队列。
+DSD64/128/256、raw DFF、历史曲目与播放位置恢复均已通过实测。当前优先修复多个箔争用独占设备，并实现记住上次选择的 DAC。已有资源的 metadata 与封面未发现问题，不列补充事项。DST、正式插件安装等仍属后续范围；宿主继续拥有外部列表。
 
 验收：用户双击、拖入或批量打开 DSF/DFF 时，行为与 foofoil 其他内容一致；列表、菜单和快捷键使用宿主能力；未安装插件时能从应用内安装并继续打开。
 
 ### Phase 2：SACD ISO
 
-Stereo Area 未压缩 3-in-14/3-in-16 已接通：sniff、Track 枚举、宿主 CUE 式列表、曲目 Seek、同一 Session 内切歌。仍缺 DST 流、gapless 精修、多声道与 Session 恢复。
+Stereo Area 未压缩 3-in-14/3-in-16 已接通：sniff、Track 枚举、宿主 CUE 式列表、曲目 Seek、同一 Session 内切歌。历史曲目和播放位置恢复已通过用户验收；仍缺 DST 流、gapless 精修与多声道。
 
 验收（未压缩立体声已达到）：一个 ISO 建立一个 Session，所有 Track 在现有列表中可导航；不生成临时 DSF，不把 Track 伪装成多个外部文件，也不接管普通非 SACD ISO。
 
@@ -813,18 +813,19 @@ Hi-Fi 与 foofoil 独立发版。队列、Track ID 和设置状态需要 schema 
 - 多窗口：PCM lease 与 DSD HAL 互斥，宿主在新箔接管前停止旧 PCM 输出，Hi-Fi 以 client ID 防止旧箔释放新 lease；
 - 退出独占时恢复原 nominal/physical/virtual format 并释放 Hog Mode。
 
-自动化已覆盖契约向后解码、ABI 编译、设备 rate 枚举和三仓构建。普通 PCM 单曲已实测可切换设备，支持设备按音源采样率工作；设备目录缓存和无变化格式跳过已缩短切换等待，旧分段回调失效后也已实测可从切换位置续播。仍需验证系统默认跟随、44.1/48/96/192 kHz 全组合、不支持 rate 的 SRC 状态、DSD 禁用项呈现，以及拔出/睡眠/多窗口争用恢复。
+自动化已覆盖契约向后解码、ABI 编译、设备 rate 枚举和三仓构建。普通 PCM 单曲已实测可切换设备，支持设备按音源采样率工作；设备目录缓存和无变化格式跳过已缩短切换等待，旧分段回调失效后也已实测可从切换位置续播。2026-09-07 用户确认多个箔争用独占设备存在问题，待定位修复；其他已测场景未发现问题，不据此推定所有设备/素材组合已覆盖。记住上次选择的 DAC 仍未完成，需保存稳定 UID 并在恢复时重新验证兼容性。
 
 ---
 
 ## 21. 建议下一步
 
-Phase 0 的 DSF/DoP 与统一列表 Spike 已打通。raw DFF 立体声、DSD256、设备断开/占用/Hog/睡眠恢复均已通过真实硬件验收；未压缩立体声 SACD ISO 已在 SMSL 上出声，曲目自然续播也已通过连续两曲实听。5.0 输出随 DAC 能力选择，但因暂无环绕 DoP DAC，真实多声道验收暂缓。下一步按风险排序：
+2026-09-07 用户验收：DSD128 已通过实机验证，DSD64/128/256 验证矩阵补齐。本轮历史 Session 的曲目、播放位置及暂停恢复已通过。已有音频资源未发现 metadata 问题，不将补 metadata 列为事项。
 
-1. 用真实 DAC 验收第 20.7 节的通用输出设备选择与 PCM 采样率跟随；
-2. 验收历史恢复及 DoP 不可用时的提示与资源释放；
-3. 完成 DSD128 硬件回归；有环绕 DoP DAC 后再回归 5.0/5.1/7.1；
-4. 再加入 DST、SACD 多声道、专项 metadata、Session 恢复和正式发布流程。
+1. 修复多个箔争用独占设备的问题：用户已确认存在，具体复现和根因待定位；其他已测场景未发现问题。
+2. 实现记住上次选择的 DAC：以稳定 UID 保存，重开时验证在线及当前 DSD 倍率的 DoP 能力，恢复选择并保持暂停。
+3. 有环绕 DoP DAC 后再验证 5.0/5.1/7.1；DST、SACD 多声道及正式发布按后续需求推进。
+
+DSD → PCM 明确不做；Engine Service/XPC 单独评估，不作为当前修复前提。
 
 ---
 
