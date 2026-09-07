@@ -1,6 +1,6 @@
 # Hi-Fi 阶段性交接：DSF / DoP 与统一音频体验
 
-> 更新日期：2026-09-04
+> 更新日期：2026-09-07
 >
 > 当前里程碑：Stereo DSD64 DSF/DFF 已在 SMSL DAC 上实机播放；DSD256 已通过真实硬件验证，DSD128 仍待回归。5.0 DFF 在立体声 DAC 上走 MLFT/MRGT 折混，设备提供 5/6/8 声道 DoP 格式时按 5.0/5.1/7.1 输出；因暂无环绕 DoP DAC，多声道输出实测暂缓。未压缩立体声 SACD ISO（3-in-14）已在同一 SMSL 上实机播放：CUE 式曲目列表、Seek、DoP 出声及自然续播均已确认。DAC 释放屏障与切歌播放意图已提交；设备断开/占用/Hog/睡眠恢复也已通过真实 DAC 手测。DST / SACD 多声道仍未做。
 >
@@ -54,7 +54,6 @@ foofoil/
 
 不要把下列能力误认为已完成：
 
-- DSD → PCM fallback；
 - DST DFF 或 SACD 多声道 / DST ISO 播放；
 - DSD128 的真实硬件回归（DSD256 已通过）；
 - 5.0/5.1/7.1 DoP 在环绕 DAC 上的真实硬件回归（代码已按格式探测选择，SMSL 上仍走立体声折混；因暂无相应设备暂缓）；
@@ -240,6 +239,18 @@ HAL callback 禁止文件 I/O、锁、内存分配、JSON、日志或 Swift coll
 
 ## 9. 当前状态与下一步
 
+2026-09-07 产品决策：DSD 仅通过 DoP 输出，不实现 DSD → PCM fallback，也不提供 Automatic / Prefer DoP / Always PCM 策略。这是范围排除，不是待办。无兼容设备、设备被占用或初始化失败时停止并说明原因；曲目和封面仍可展示，播放时显示实际 DoP 模式、倍率和设备。普通 PCM 的设备选择与系统默认回退保持独立。Runtime 的 `outputPolicy: "automatic"` 是遗留字段，待另行调整代码，不代表已实现转换。
+
+
+2026-09-07 Session 进度恢复增补（本轮工作区改动，尚未提交）：
+
+- 宿主用新建的 Hi-Fi Session 依次恢复保存的容器 Track ID 和播放位置，完成后才交给视图；历史重开保持暂停，不自动起播，也不主动释放另一窗口的 PCM 独占 lease。
+- 进度以新曲目时长为上限；忽略非有限数值和负值。旧 Track ID 不存在或不可播放时，不把其进度套到第一曲。
+- 播放中每五秒保存一次扩展快照，不刷新历史排序；暂停、Seek 等命令仍立即保存。异常退出可能丢失最近约五秒进度，未承诺崩溃时精确恢复。
+- Runtime 对未持有播放器的会话执行 pause 时保留自身位置，不停止另一会话；覆盖恢复后尚未起播时重复暂停的路径。
+- 验证：宿主全量 `xcodebuild test`、Hi-Fi 33 项核心测试、ExtensionKit 8 项契约测试及 Runtime `--self-test` 均通过；已通过宿主 `./run` 构建、注入插件并启动。
+- 本轮未补专项 metadata 或保存设备 UID 的恢复衔接。真实 DAC/GUI 的重开、选曲、位置及跨窗口输出仍须验收。
+
 2026-09-07 历史记录恢复修复（宿主 `8b91e2c` 已提交）：
 
 - 历史打开外部扩展资源时，使用保存的 `ContentRequest`（含安全范围书签）重新建立 Runtime Session；不再直接复用关闭后失效的 Session UUID。
@@ -274,13 +285,19 @@ HAL callback 禁止文件 I/O、锁、内存分配、JSON、日志或 Swift coll
 建议下一步顺序：
 
 1. 按第 9.1 节完成通用输出设备选择的真实 DAC 验收；
-2. 实现 DSD → PCM fallback 以及 Automatic / Prefer DoP / Always PCM；
+2. 验收历史恢复及 DoP 不可用时的提示与资源释放；
 3. 用真实设备回归 DSD128；环绕 5.0/5.1/7.1 DoP 等具备相应 DAC 后再做；
 4. 补 DSF/DFF 专项 metadata、设置和真正可恢复 Session；
 5. DST 与 SACD 多声道；
 6. 最后评估 Engine Service/XPC 和正式 Release 安装、升级、签名流程。
 
-Phase 1 的验收不是 parser 能读 DFF，而是 DSF/DFF 能从 Finder、拖放和混合列表进入同一宿主体验；DoP 不可用时自动 PCM；Seek、切歌、设备切换和恢复不会遗留设备状态。
+Phase 1 的验收不是 parser 能读 DFF，而是 DSF/DFF 能从 Finder、拖放和混合列表进入同一宿主体验；DoP 不可用时停止并明确提示，不转换 PCM；Seek、切歌、设备切换和恢复不会遗留设备状态。
+
+### 9.2 metadata 与 Session 恢复的剩余范围
+
+- metadata：宿主已有通用信息、同目录/内嵌封面及历史缩略图；剩余是 DSF/DFF 专项标签读取与覆盖验证，例如文件中存在的标题、艺术家、专辑、曲号和内嵌封面。按真实样本缺失情况补充，不另建 UI 或音乐资料库。
+- Session 恢复：历史重开已能重新建会话，保留混合列表顺序和当前项；本轮已补容器曲目与播放位置恢复，仍待 GUI 验收；后续是与已保存设备 UID 偏好的衔接及更多资源变更场景验证。恢复时重新验证资源和设备，不复用旧 Session UUID，不因恢复自动抢占设备或起播。设备偏好服务已经存在，不需重建。
+- 上述是后续范围，不表示当前标签、封面或历史重开完全不可用；优先验收已提交的历史恢复修复。
 
 ## 10. 新会话启动清单
 

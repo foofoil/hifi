@@ -120,6 +120,19 @@ do {
             throw SmokeError.invalidSession
         }
     }
+    if isSelfTest {
+        var playback = finalSession["mediaPlayback"] as! [String: Any]
+        playback["position"] = 1.0
+        finalSession["mediaPlayback"] = playback
+        finalSession = try perform("hifi.seek", session: finalSession)
+        finalSession = try perform("hifi.pause", session: finalSession)
+        finalSession = try perform("hifi.pause", session: finalSession)
+        guard let restored = finalSession["mediaPlayback"] as? [String: Any],
+              restored["state"] as? String == "paused",
+              let position = restored["position"] as? Double, abs(position - 1) < 0.00001 else {
+            throw SmokeError.invalidSession
+        }
+    }
     let pretty = try JSONSerialization.data(withJSONObject: finalSession, options: [.prettyPrinted, .sortedKeys])
     FileHandle.standardOutput.write(pretty)
     FileHandle.standardOutput.write(Data("\n".utf8))

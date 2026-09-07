@@ -448,14 +448,20 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 record.failureDescription = failureKey(error)
             }
         case "hifi.pause":
-            let status = try player.stop()
-            record.samplePosition = status.samplePosition
-            record.underrunCount = status.underrunCount
-            record.playbackState = "paused"
-            record.failureDescription = status.failureDescription
             lock.lock()
-            if playingSessionID == id { playingSessionID = nil }
+            let ownsPlayer = playingSessionID == id
             lock.unlock()
+            // 恢复后尚未起播的会话保留 seek 位置，也不能停止另一窗口持有的输出。
+            if ownsPlayer {
+                let status = try player.stop()
+                record.samplePosition = status.samplePosition
+                record.underrunCount = status.underrunCount
+                record.failureDescription = status.failureDescription
+                lock.lock()
+                if playingSessionID == id { playingSessionID = nil }
+                lock.unlock()
+            }
+            record.playbackState = "paused"
         case "hifi.seek":
             guard let playback = session["mediaPlayback"] as? [String: Any],
                   let requestedPosition = (playback["position"] as? NSNumber)?.doubleValue,

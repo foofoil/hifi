@@ -1,8 +1,10 @@
 # foofoil Hi-Fi 插件：DSF / DFF / SACD ISO 技术方案
 
+> 产品决策（2026-09-07）：DSD 仅通过 DoP 输出，不实现 DSD → PCM fallback，不提供 Automatic / Prefer DoP / Always PCM 转换策略。DoP 不可用时停止并明确提示；普通 PCM 设备路由不受影响。
+>
 > 文档状态：2026-09-04 按三个独立仓库的现行实现与硬件验收结果校准（v2）。`foofoil` 是宿主应用，`extension-kit` 是稳定扩展契约，`hifi` 是独立第一方扩展。
 >
-> 核心结论：DSF、DFF、SACD ISO、DST、DoP、DSD → PCM、专业设备路由等高级音频能力不进入 foofoil Core，而由第一方可选组件 **Hi-Fi** 提供；SACD ISO 等多曲目内容使用 foofoil 现有列表界面呈现，不在插件中另造曲目列表 UI。
+> 核心结论：DSF、DFF、SACD ISO、DST、DoP、专业设备路由等高级音频能力不进入 foofoil Core，而由第一方可选组件 **Hi-Fi** 提供；SACD ISO 等多曲目内容使用 foofoil 现有列表界面呈现，不在插件中另造曲目列表 UI。
 
 ---
 
@@ -40,7 +42,7 @@ Hi-Fi 插件
 ├── 高级音频格式识别与解析
 ├── DSF / DFF / SACD ISO / DST
 ├── DSDStream 与容器内部 Track 语义
-├── DoP 与 DSD → PCM
+├── DoP 输出
 ├── CoreAudio HAL、设备探测与独占输出
 ├── 高级音频 metadata
 └── 音频领域设置与命令状态
@@ -86,7 +88,7 @@ foofoil 现有列表面板显示曲目
 - metadata 与封面；
 - 播放、暂停、Seek、上一项、下一项；
 - 复用 foofoil 音频列表和 Navigator Panel；
-- DoP 输出与 DSD → PCM 自动降级；
+- DoP 输出与不兼容设备的明确提示；
 - 输出设备能力检测、设备选择与插拔恢复；
 - Exclusive / Hog Mode；
 - 与 Built-in Audio Provider 的明确选择和回退。
@@ -105,7 +107,6 @@ foofoil 现有列表面板显示曲目
 
 - SACD Multichannel Area；
 - APE、WavPack 等其他高级格式；
-- 更高质量且可配置的 DSD → PCM 滤波；
 - 音频可视化与有限的音效能力；
 - Native DSD，仅在 macOS 与目标设备存在可靠、可验证通路时考虑。
 
@@ -170,13 +171,11 @@ DSF / DFF / SACD ISO
 
 DoP 只封装 DSD payload，不执行 DSD → PCM。链路中不得发生 SRC、混音、软件音量缩放或 DSP 修改。
 
-### 3.4 DoP 不可用时保证可播放
+### 3.4 DSD 仅通过 DoP 输出
 
-```text
-DSDStream → DSDPCMDecoder → PCM Output → 当前设备
-```
+不实现 DSD → PCM 转换。无兼容设备、不支持当前 DSD 倍率或独占初始化失败时，停止播放并显示具体原因，允许用户连接或选择兼容设备后重试。曲目列表、metadata 与封面仍可展示。
 
-Mac 内置扬声器、蓝牙设备、普通 PCM DAC、无法提供所需 carrier rate 的设备或独占初始化失败时，默认自动降级为 PCM，而不是把内容判定为不可播放。
+播放状态必须反映实际生效的 DoP 模式、DSD 倍率与设备。设备断开或被占用后不得静默转 PCM。普通 PCM 文件仍按既有宿主播放与设备服务处理。
 
 ### 3.5 不把容器曲目伪装成独立文件
 
@@ -203,7 +202,7 @@ SACD ISO 是一个外部受权资源，Track 是其中的逻辑项目。不能�
 | 文件安全范围授权 | 创建书签并定义授权生命周期 | Engine Session 解析书签并成组持有/释放访问 |
 | 普通音频基础播放 | Built-in Provider | 可选择性增强或接管 |
 | DSF / DFF / SACD ISO | 不解析 | 负责 |
-| DST、DSD → PCM、DoP | 不实现 | 负责 |
+| DST、DoP | 不实现 | 负责 |
 | 设备探测与 HAL 实时输出 | 不理解协议细节 | 负责 |
 | 外部文件列表与播放顺序 | 负责并维护唯一真实状态 | 只播放当前路由到插件的文件 |
 | SACD 容器 Track 语义 | 持有通用虚拟媒体项并转发动作 | 解析并维护 Track 真实状态 |
@@ -305,7 +304,7 @@ HiFiSessionState
 ├── playbackPosition / playbackState
 ├── containerRepeatMode / shuffleMode?
 ├── selectedOutputDeviceID?
-├── outputPolicy
+├── outputMode               # DSD 固定 DoP
 └── currentOutputStatus
 ```
 
@@ -419,18 +418,14 @@ SACD Track 初次解析可以分阶段返回：
                             │
                          DSDStream
                             │
-                 ┌──────────┴──────────┐
-                 │                     │
-             DoPEncoder           DSDPCMDecoder
-                 │                     │
-                 └──────────┬──────────┘
+                       DoPEncoder
                             │
                     HALAudioOutput
                             │
                       CoreAudio Device
 ```
 
-所有 DSD 来源最终收敛到 `DSDStream`。容器差异不能泄漏到 DoP、PCM fallback、设备探测或列表 UI。
+所有 DSD 来源最终收敛到 `DSDStream`。容器差异不能泄漏到 DoP、设备探测或列表 UI。
 
 ---
 
@@ -535,7 +530,7 @@ DST 是无损 DSD 压缩，`DST → DSD` 后仍可进入 DoP，不等同于 DSD 
 
 ---
 
-## 12. DoP、PCM fallback 与输出路由
+## 12. DoP 与输出路由
 
 ### 12.1 DoP
 
@@ -562,29 +557,27 @@ DST 是无损 DSD 压缩，`DST → DSD` 后仍可进入 DoP，不等同于 DSD 
 
 设备重连、默认设备变化、睡眠唤醒或属性变化后使缓存失效。
 
-### 12.3 自动策略
+### 12.3 DoP 输出策略
 
 ```text
 打开 DSD → Probe 设备
    ├── 支持 → 尝试 Exclusive / HAL / DoP
-   │            ├── Success → DoP
-   │            └── Failure → PCM fallback
-   └── 不支持 → PCM fallback
+   │            ├── Success → 报告实际 DoP 输出
+   │            └── Failure → 释放资源，停止并提示原因
+   └── 不支持 → 提示所需 DoP 能力，允许选择兼容设备
 ```
 
-设置建议为 Automatic、Prefer DoP、Always convert to PCM，默认 Automatic。
+不提供 DSD 转 PCM 或三档转换策略。Runtime 当前的 `outputPolicy: "automatic"` 是遗留状态字段，不代表存在 PCM fallback；字段调整与兼容处理留待代码变更。
 
-### 12.4 DSD → PCM 与音量
+### 12.4 音量
 
-第一版目标是正确、稳定、CPU 成本合理、不爆音和不削波。采样率优先选择 44.1 kHz family：352.8、176.4、88.2、44.1 kHz，并根据设备能力与 CPU 成本降级。
-
-DoP 下禁止软件音量。有硬件音量时控制设备属性；没有时禁用软件音量，并显示 Fixed Volume / Bit-perfect。PCM fallback 可使用正常音量策略。
+DoP 下禁止软件音量。有硬件音量时控制设备属性；没有时禁用软件音量，并显示 Fixed Volume / Bit-perfect。普通 PCM 音频沿用自身音量策略。
 
 ---
 
 ## 13. 实时线程、Seek 与 gapless
 
-HAL callback 中禁止文件 I/O、malloc/free、Swift async/await、长锁等待、DST 解码、DSD → PCM 重计算和 XPC 往返。
+HAL callback 中禁止文件 I/O、malloc/free、Swift async/await、长锁等待、DST 解码和 XPC 往返。
 
 ```text
 Reader / Decoder worker → bounded ring buffer → HAL realtime callback
@@ -613,8 +606,8 @@ SACD 容器 Track 可在下一项前提前 prepare。外部文件列表当前按
 → 释放 Hog Mode
 → 恢复插件修改过的设备属性
 → probe 新设备
-→ 选择 DoP 或 PCM
-→ 从安全位置恢复播放
+→ 验证当前 DSD rate 的 DoP 能力
+→ 保持暂停，由用户重新播放；不兼容时明确提示
 ```
 
 覆盖设备拔出、默认设备改变、设备被占用、sleep/wake、Engine Service 崩溃、foofoil 退出、插件禁用/升级和多窗口竞争。
@@ -629,7 +622,7 @@ foofoil 保留内容窗口、封面、通用播放控件、Navigator Panel 和�
 
 ```text
 DSD64 · DoP · SMSL USB AUDIO
-DSD64 → PCM 176.4 kHz · Mac Speakers
+无法播放 DSD64 · 当前设备不支持所需 DoP 输出
 ```
 
 插件通过 `CommandDescriptor` 贡献输出设备、输出策略、Exclusive Mode、循环/随机和后续音效入口。Core 负责本地化、菜单、快捷键冲突、活动窗口路由和辅助功能。插件不传递 `NSMenu` 或 SwiftUI View 作为长期协议。
@@ -638,13 +631,13 @@ DSD64 → PCM 176.4 kHz · Mac Speakers
 
 ```text
 idle → openingSource → readingMetadata / indexing
-→ probingDevice → preparingDoP / preparingPCM
+→ probingDevice → preparingDoP
 → ready / playing ↔ paused → stopped
 ```
 
 错误至少区分 invalidDSF、invalidDFF、invalidSACDISO、unsupportedArea、DSTDecodeFailure、seekIndexFailure、deviceDisconnected、deviceBusy、unsupportedDoPRate、exclusiveModeFailure、outputInitializationFailure、resourceAuthorizationFailure 和 engineServiceUnavailable。
 
-- DoP 初始化失败：通常可转 PCM；
+- DoP 初始化失败：释放资源，停止播放并提示原因，允许选择兼容设备后重试；
 - metadata/封面失败：可继续播放；
 - 单个队列项损坏：标记不可播放并可继续下一项；
 - ISO 无效或 DST decoder 失败：当前内容不可播放；
@@ -657,11 +650,11 @@ idle → openingSource → readingMetadata / indexing
 
 ## 16. 依赖与许可证
 
-优先使用 Foundation、CoreAudio、AudioToolbox、AVFoundation 和 ImageIO。只在 Hi-Fi 内补充 DSF/DFF parser、DST decoder、SACD parser、DoP encoder 与 DSD → PCM。
+优先使用 Foundation、CoreAudio、AudioToolbox、AVFoundation 和 ImageIO。只在 Hi-Fi 内补充 DSF/DFF parser、DST decoder、SACD parser、DoP encoder。
 
 候选实现：
 
-- SFBAudioEngine：评估 DSF、DSDIFF、DoP、DSD → PCM、可裁剪范围、许可证和体积；
+- SFBAudioEngine：评估 DSF、DSDIFF、DoP、可裁剪范围、许可证和体积；
 - sacd_extract / sacd-ripper：评估 Scarlet Book、Area/Track、frame 读取与 DST decoder。
 
 默认不引入 Qt、完整 FFmpeg、大型跨平台播放器、媒体库框架或完整 DSP framework。任何第三方代码进入前必须确认许可证与 notices、可裁剪体积、安全记录、arm64/macOS 支持、服务隔离能力和传递依赖。
@@ -732,7 +725,7 @@ ContentRequest
 5. 普通音频与 DSF 的统一列表、拖拽排序、动态图标、键盘/媒体键和播放模式已成立；
 6. 封面、metadata 外壳、播放控件和技术信息复用宿主 UI，没有插件自定义列表；
 7. 关闭 Session 会恢复设备格式并释放 Hog Mode；切换 Provider 前宿主等待释放完成；
-8. DST、PCM fallback、Engine Service 与正式 Release 安装仍属后续工作；
+8. DST、Engine Service 与正式 Release 安装仍属后续工作；
 9. raw DFF 已接通 DoP/HAL：立体声 DFF DSD64 已在 SMSL 上验收；5.0 DFF 按设备格式走 5ch / 5.1 / 7.1 或立体声折混；
 10. 设备断开/占用/Hog/睡眠恢复已通过真实 DAC 手测；
 11. 未压缩立体声 SACD ISO（3-in-14）已接通 sniff、CUE 式宿主列表、Seek 与 DoP 出流，并在 SMSL 上对 Wand 贝多芬 ISO 确认出声；自然结束后自动续播下一曲也已通过连续两曲实听；DST / 多声道仍未做；
@@ -740,7 +733,7 @@ ContentRequest
 
 ### Phase 1：DSF / DFF 可发布版本
 
-在现有 DSF/DoP 闭环上完成 DSD128 回归、raw DFF Reader、DST、PCM fallback、设备变化恢复、DSF/DFF 专项 metadata、Session 恢复、设置、本地化和正式插件安装。DSD256 与设备变化恢复已经通过真实硬件验收。外部多文件顺序继续由宿主列表负责，不在 Hi-Fi 内重建一套队列。
+在现有 DSF/DoP 闭环上完成 DSD128 回归、raw DFF Reader、DST、设备变化恢复、DSF/DFF 专项 metadata、Session 恢复、设置、本地化和正式插件安装。DSD256 与设备变化恢复已经通过真实硬件验收。外部多文件顺序继续由宿主列表负责，不在 Hi-Fi 内重建一套队列。
 
 验收：用户双击、拖入或批量打开 DSF/DFF 时，行为与 foofoil 其他内容一致；列表、菜单和快捷键使用宿主能力；未安装插件时能从应用内安装并继续打开。
 
@@ -775,8 +768,8 @@ Stereo Area 未压缩 3-in-14/3-in-16 已接通：sniff、Track 枚举、宿主 
 | 插件 UI | 不自绘播放列表；命令和状态由宿主呈现 |
 | DSD 输出 | DoP 优先 |
 | DoP 输出 | 当前 Hi-Fi in-process Runtime 内 CoreAudio HAL；保留迁移 Service 的协议边界 |
-| DoP 不可用 | 自动 DSD → PCM |
-| Exclusive | DoP 时尽量 Hog Mode，失败可降级 |
+| DoP 不可用 | 停止并明确提示，不转换 PCM |
+| Exclusive | DoP 时尽量 Hog Mode，失败释放资源并提示 |
 | ISO 播放 | 流式，不生成临时 DSF |
 | Native DSD | 第一版不做 |
 | 依赖 | 只放入 Hi-Fi，重新评估许可证与裁剪成本 |
@@ -829,7 +822,7 @@ Hi-Fi 与 foofoil 独立发版。队列、Track ID 和设置状态需要 schema 
 Phase 0 的 DSF/DoP 与统一列表 Spike 已打通。raw DFF 立体声、DSD256、设备断开/占用/Hog/睡眠恢复均已通过真实硬件验收；未压缩立体声 SACD ISO 已在 SMSL 上出声，曲目自然续播也已通过连续两曲实听。5.0 输出随 DAC 能力选择，但因暂无环绕 DoP DAC，真实多声道验收暂缓。下一步按风险排序：
 
 1. 用真实 DAC 验收第 20.7 节的通用输出设备选择与 PCM 采样率跟随；
-2. 实现 DSD → PCM fallback 与 Automatic / Prefer DoP / Always PCM 策略；
+2. 验收历史恢复及 DoP 不可用时的提示与资源释放；
 3. 完成 DSD128 硬件回归；有环绕 DoP DAC 后再回归 5.0/5.1/7.1；
 4. 再加入 DST、SACD 多声道、专项 metadata、Session 恢复和正式发布流程。
 
