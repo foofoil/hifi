@@ -32,6 +32,8 @@ private enum RuntimeStatus {
 }
 
 private let createSessionCallback: RuntimeCall = { _, input, inputLength, output, outputLength in
+    runtimeControlLock.lock()
+    defer { runtimeControlLock.unlock() }
     guard let request = jsonObject(input, length: inputLength) else {
         return RuntimeStatus.unsupportedRequest
     }
@@ -99,6 +101,8 @@ private func prepareSources(request: [String: Any]) throws -> [RuntimeSource] {
 }
 
 private let performCommandCallback: RuntimeCall = { _, input, inputLength, output, outputLength in
+    runtimeControlLock.lock()
+    defer { runtimeControlLock.unlock() }
     guard let message = jsonObject(input, length: inputLength),
           let commandID = message["commandID"] as? String,
           var session = message["session"] as? [String: Any] else {
@@ -113,13 +117,15 @@ private let performCommandCallback: RuntimeCall = { _, input, inputLength, outpu
 }
 
 private let performApplicationCommandCallback: RuntimeCall = { _, input, inputLength, output, outputLength in
+    runtimeControlLock.lock()
+    defer { runtimeControlLock.unlock() }
     guard let message = jsonObject(input, length: inputLength) else {
         return RuntimeStatus.invalidMessage
     }
     do {
         let response = try audioDeviceServiceController.perform(
             message,
-            stopDSDPlayback: { try runtimeController.stopForExternalPCM() }
+            stopDSDPlayback: { try runtimeController.stopForExternalPCM(deviceUID: $0) }
         )
         return writeJSON(response, to: output, length: outputLength)
     } catch {
@@ -129,10 +135,14 @@ private let performApplicationCommandCallback: RuntimeCall = { _, input, inputLe
 
 private let releaseCallback: ReleaseCall = { _, bytes, _ in bytes?.deallocate() }
 private let destroyCallback: DestroyCall = { _ in
+    runtimeControlLock.lock()
+    defer { runtimeControlLock.unlock() }
     audioDeviceServiceController.shutdown()
     runtimeController.shutdown()
 }
 
+// 会话命令与应用级 PCM 命令可从不同线程进入；统一串行交接设备，HAL callback 不使用此锁。
+private let runtimeControlLock = NSRecursiveLock()
 private let runtimeController = HiFiRuntimeController()
 private let audioDeviceServiceController = AudioDeviceServiceController()
 
@@ -382,9 +392,7 @@ private func formatDuration(_ seconds: TimeInterval) -> String {
 
 private final class HiFiRuntimeController: @unchecked Sendable {
     private let lock = NSLock()
-    private let player = HALDSFPlaybackEngine()
     private var sessions: [UUID: RuntimeSession] = [:]
-    private var playingSessionID: UUID?
 
     func registerSession(id: UUID, sources: [RuntimeSource], devices: [HiFiAudioOutputDevice]) {
         let sampleRate = sources.first?.descriptor.sampleRate
@@ -420,7 +428,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         switch commandID {
         case "hifi.play":
             do {
-                audioDeviceServiceController.releasePCMForDSD()
+                audioDeviceServiceController.releasePCMForDSD(deviceUID: record.selectedDeviceID)
                 guard let deviceUID = record.selectedDeviceID else {
                     throw RuntimeControllerError.noOutputDevice
                 }
@@ -428,7 +436,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 if record.sampleCount > 0, record.samplePosition >= record.sampleCount {
                     record.samplePosition = 0
                 }
-                try player.play(
+                try record.player.play(
                     fileAt: record.url,
                     deviceUID: deviceUID,
                     startingSample: record.samplePosition,
@@ -438,27 +446,27 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 record.underrunCount = 0
                 record.failureDescription = nil
                 lock.lock()
-                playingSessionID = id
+                record.isActive = true
                 lock.unlock()
             } catch {
                 lock.lock()
-                if playingSessionID == id { playingSessionID = nil }
+                if record.isActive { record.isActive = false }
                 lock.unlock()
                 record.playbackState = "failed"
                 record.failureDescription = failureKey(error)
             }
         case "hifi.pause":
             lock.lock()
-            let ownsPlayer = playingSessionID == id
+            let ownsPlayer = record.isActive
             lock.unlock()
             // 恢复后尚未起播的会话保留 seek 位置，也不能停止另一窗口持有的输出。
             if ownsPlayer {
-                let status = try player.stop()
+                let status = try record.player.stop()
                 record.samplePosition = status.samplePosition
                 record.underrunCount = status.underrunCount
                 record.failureDescription = status.failureDescription
                 lock.lock()
-                if playingSessionID == id { playingSessionID = nil }
+                if record.isActive { record.isActive = false }
                 lock.unlock()
             }
             record.playbackState = "paused"
@@ -474,18 +482,18 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             )
             let targetSample = requestedSample - requestedSample % 16
             lock.lock()
-            let wasPlaying = playingSessionID == id
-            if wasPlaying { playingSessionID = nil }
+            let wasPlaying = record.isActive
+            if wasPlaying { record.isActive = false }
             lock.unlock()
             record.samplePosition = targetSample
             record.underrunCount = 0
             if wasPlaying {
                 do {
-                    _ = try player.stop()
+                    _ = try record.player.stop()
                     guard let deviceUID = record.selectedDeviceID else {
                         throw RuntimeControllerError.noOutputDevice
                     }
-                    try player.play(
+                    try record.player.play(
                         fileAt: record.url,
                         deviceUID: deviceUID,
                         startingSample: targetSample,
@@ -494,7 +502,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                     record.playbackState = "playing"
                     record.failureDescription = nil
                     lock.lock()
-                    playingSessionID = id
+                    record.isActive = true
                     lock.unlock()
                 } catch {
                     record.playbackState = "failed"
@@ -536,25 +544,29 @@ private final class HiFiRuntimeController: @unchecked Sendable {
     }
 
     func shutdown() {
-        _ = try? player.stop()
         lock.lock()
+        let records = Array(sessions.values)
         sessions.removeAll()
-        playingSessionID = nil
         lock.unlock()
+        for record in records { _ = try? record.player.stop() }
     }
 
-    func stopForExternalPCM() throws {
+    func stopForExternalPCM(deviceUID: String) throws {
+        try stopPlayback(on: deviceUID)
+    }
+
+    private func stopPlayback(on deviceUID: String) throws {
         lock.lock()
-        let trackedID = playingSessionID
-        let trackedRecord = trackedID.flatMap { sessions[$0] }
-        playingSessionID = nil
+        let records = sessions.values.filter { $0.isActive && $0.selectedDeviceID == deviceUID }
         lock.unlock()
-        guard let trackedRecord else { return }
-        let status = try player.stop()
-        trackedRecord.samplePosition = status.samplePosition
-        trackedRecord.underrunCount = status.underrunCount
-        trackedRecord.playbackState = "paused"
-        trackedRecord.failureDescription = status.failureDescription
+        for record in records {
+            let status = try record.player.stop()
+            record.isActive = false
+            record.samplePosition = status.samplePosition
+            record.underrunCount = status.underrunCount
+            record.playbackState = "paused"
+            record.failureDescription = status.failureDescription
+        }
     }
 
     /// 设备插拔后立刻刷新会话内的设备列表；当前独占设备离线时暂停并回退到兼容的系统默认设备，
@@ -582,15 +594,15 @@ private final class HiFiRuntimeController: @unchecked Sendable {
 
         if !currentStillUsable {
             lock.lock()
-            let wasPlaying = playingSessionID == record.id
+            let wasPlaying = record.isActive
             lock.unlock()
             if wasPlaying {
-                if let status = try? player.stop() {
+                if let status = try? record.player.stop() {
                     record.samplePosition = status.samplePosition
                     record.underrunCount = status.underrunCount
                 }
                 lock.lock()
-                playingSessionID = nil
+                record.isActive = false
                 lock.unlock()
             }
             if let fallback = compatible.first(where: \.isSystemDefault) ?? compatible.first {
@@ -661,16 +673,16 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
 
         lock.lock()
-        let wasPlaying = playingSessionID == record.id
+        let wasPlaying = record.isActive
         lock.unlock()
         if wasPlaying {
-            let status = try player.stop()
+            let status = try record.player.stop()
             record.samplePosition = status.samplePosition
             record.underrunCount = status.underrunCount
             record.playbackState = "paused"
             record.failureDescription = status.failureDescription
             lock.lock()
-            playingSessionID = nil
+            record.isActive = false
             lock.unlock()
         }
         record.selectedDeviceID = selectedID
@@ -682,7 +694,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
         if wasPlaying {
             do {
-                try player.play(
+                audioDeviceServiceController.releasePCMForDSD(deviceUID: selectedID)
+                try stopTrackedPlayback(beforeStarting: record)
+                try record.player.play(
                     fileAt: record.url,
                     deviceUID: selectedID,
                     startingSample: record.samplePosition,
@@ -691,7 +705,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 record.playbackState = "playing"
                 record.failureDescription = nil
                 lock.lock()
-                playingSessionID = record.id
+                record.isActive = true
                 lock.unlock()
             } catch {
                 record.playbackState = "failed"
@@ -702,28 +716,17 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         session["commands"] = commands
     }
 
-    /// HAL 播放器为进程级独占资源；切换箔片前先保存上一会话的位置。
+    /// 只交接同一设备，其他 DAC 上的会话可继续播放。
     private func stopTrackedPlayback(beforeStarting record: RuntimeSession) throws {
-        lock.lock()
-        let trackedID = playingSessionID
-        let trackedRecord = trackedID.flatMap { sessions[$0] }
-        playingSessionID = nil
-        lock.unlock()
-
-        guard let trackedRecord else { return }
-        let status = try player.stop()
-        trackedRecord.samplePosition = status.samplePosition
-        trackedRecord.underrunCount = status.underrunCount
-        trackedRecord.playbackState = "paused"
-        trackedRecord.failureDescription = status.failureDescription
+        if let uid = record.selectedDeviceID { try stopPlayback(on: uid) }
     }
 
     private func close(_ record: RuntimeSession) {
         lock.lock()
-        let wasPlaying = playingSessionID == record.id
-        if wasPlaying { playingSessionID = nil }
+        let wasPlaying = record.isActive
+        if wasPlaying { record.isActive = false }
         lock.unlock()
-        if wasPlaying { _ = try? player.stop() }
+        if wasPlaying { _ = try? record.player.stop() }
         lock.lock()
         sessions.removeValue(forKey: record.id)
         lock.unlock()
@@ -732,11 +735,11 @@ private final class HiFiRuntimeController: @unchecked Sendable {
     private func switchItem(to targetID: String, record: RuntimeSession) {
         guard let index = record.sources.firstIndex(where: { $0.id == targetID }), index != record.currentIndex else { return }
         lock.lock()
-        let wasPlaying = playingSessionID == record.id
-        if wasPlaying { playingSessionID = nil }
+        let wasPlaying = record.isActive
+        if wasPlaying { record.isActive = false }
         lock.unlock()
-        if wasPlaying { _ = try? player.stop() }
-        // 宿主列表切歌时，自然播完已经把 playingSessionID 清掉；若上一曲已到结尾，仍应接着播。
+        if wasPlaying { _ = try? record.player.stop() }
+        // 宿主列表切歌时，自然播完已经清除会话的 isActive 标记；若上一曲已到结尾，仍应接着播。
         let reachedEnd = record.sampleCount > 0 && record.samplePosition + 16 >= record.sampleCount
         let completedNaturally = record.playbackState == "stopped"
             || (record.playbackState == "paused" && reachedEnd)
@@ -749,13 +752,15 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         record.playbackState = "paused"
         if shouldPlay, let deviceUID = record.selectedDeviceID {
             do {
-                try player.play(
+                audioDeviceServiceController.releasePCMForDSD(deviceUID: deviceUID)
+                try stopTrackedPlayback(beforeStarting: record)
+                try record.player.play(
                     fileAt: record.url,
                     deviceUID: deviceUID,
                     sacdTrackNumber: record.sacdTrackNumber
                 )
                 record.playbackState = "playing"
-                lock.lock(); playingSessionID = record.id; lock.unlock()
+                lock.lock(); record.isActive = true; lock.unlock()
             } catch {
                 record.playbackState = "failed"
                 record.failureDescription = failureKey(error)
@@ -801,9 +806,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
     }
 
     private func updatePlaybackState(for record: RuntimeSession, session: inout [String: Any]) {
-        var status = player.status()
+        var status = record.player.status()
         lock.lock()
-        let shouldAdvance = playingSessionID == record.id
+        let shouldAdvance = record.isActive
             && status.state == .stopped
             && status.samplePosition >= record.sampleCount
             && record.currentIndex + 1 < record.sources.count
@@ -812,16 +817,16 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         if shouldAdvance {
             record.samplePosition = status.samplePosition
             switchItem(to: record.sources[record.currentIndex + 1].id, record: record)
-            status = player.status()
+            status = record.player.status()
         }
         lock.lock()
-        let wasTracked = playingSessionID == record.id
+        let wasTracked = record.isActive
         if wasTracked {
             record.samplePosition = status.samplePosition
             record.underrunCount = status.underrunCount
         }
         if wasTracked, status.state != .playing {
-            playingSessionID = nil
+            record.isActive = false
             if status.state == .failed {
                 record.playbackState = "failed"
                 record.failureDescription = status.failureDescription
@@ -834,7 +839,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 record.failureDescription = nil
             }
         }
-        let isPlaying = playingSessionID == record.id && status.state == .playing
+        let isPlaying = record.isActive && status.state == .playing
         lock.unlock()
         var reconnectedDevice: HiFiAudioOutputDevice?
         if record.playbackState == "failed",
@@ -897,6 +902,8 @@ private final class RuntimeSession {
     var sampleCount: UInt64 { sources[currentIndex].descriptor.sampleCount ?? 0 }
     var sacdTrackNumber: Int? { sources[currentIndex].sacdTrackNumber }
     var isSACDContainer: Bool { sources.contains { $0.sacdTrackNumber != nil } }
+    let player = HALDSFPlaybackEngine()
+    var isActive = false
     var selectedDeviceID: String?
     var samplePosition: UInt64 = 0
     var underrunCount: UInt64 = 0
@@ -974,135 +981,76 @@ private final class RuntimeResourceAccess {
 }
 
 private final class AudioDeviceServiceController: @unchecked Sendable {
-    private let lock = NSLock()
     private let preferenceKey = "app.foofoil.extension.hifi.preferred-pcm-device-uid"
-    private var lease: PCMExclusiveDeviceLease?
-    private var activeClientID: UUID?
+    private var leases: [String: (clientID: UUID, lease: PCMExclusiveDeviceLease)] = [:]
     private var revision: UInt64 = 0
     private var cachedDevices: [HiFiAudioOutputDevice]?
 
-    func perform(
-        _ message: [String: Any],
-        stopDSDPlayback: () throws -> Void
-    ) throws -> [String: Any] {
+    func perform(_ message: [String: Any], stopDSDPlayback: (String) throws -> Void) throws -> [String: Any] {
         guard let command = message["command"] as? String,
-              let clientIDText = message["clientID"] as? String,
-              let clientID = UUID(uuidString: clientIDText) else {
-            throw RuntimeControllerError.invalidSession
-        }
+              let clientText = message["clientID"] as? String,
+              let clientID = UUID(uuidString: clientText) else { throw RuntimeControllerError.invalidSession }
         switch command {
-        case "snapshot":
-            return try snapshot(refreshDevices: true)
+        case "snapshot": break
         case "selectSystemDefault":
-            releasePCM()
+            releasePCM(clientID: clientID)
             UserDefaults.standard.removeObject(forKey: preferenceKey)
-            bumpRevision()
+            revision &+= 1
         case "prepareExclusivePCM":
-            guard let deviceUID = message["selectedDeviceID"] as? String,
-                  let sampleRate = (message["sourceSampleRate"] as? NSNumber)?.doubleValue,
-                  let channelCount = (message["channelCount"] as? NSNumber)?.intValue else {
+            guard let uid = message["selectedDeviceID"] as? String,
+                  let rate = (message["sourceSampleRate"] as? NSNumber)?.doubleValue,
+                  let channels = (message["channelCount"] as? NSNumber)?.intValue else {
                 throw RuntimeControllerError.invalidSession
             }
-            try stopDSDPlayback()
-            releasePCM()
-            let nextLease = try PCMExclusiveDeviceLease(
-                deviceUID: deviceUID,
-                sourceSampleRate: sampleRate,
-                channelCount: channelCount
-            )
-            lock.lock()
-            lease = nextLease
-            activeClientID = clientID
+            try stopDSDPlayback(uid)
+            releasePCM(clientID: clientID)
+            releasePCM(deviceUID: uid)
+            let lease = try PCMExclusiveDeviceLease(deviceUID: uid, sourceSampleRate: rate, channelCount: channels)
+            leases[uid] = (clientID, lease)
+            UserDefaults.standard.set(uid, forKey: preferenceKey)
             revision &+= 1
-            lock.unlock()
-            UserDefaults.standard.set(deviceUID, forKey: preferenceKey)
-        case "releasePCM":
-            lock.lock()
-            let ownsLease = activeClientID == clientID
-            lock.unlock()
-            if ownsLease { releasePCM() }
-        case "releaseAllPCM":
-            releasePCM()
-        default:
-            throw RuntimeControllerError.invalidSession
+        case "releasePCM": releasePCM(clientID: clientID)
+        case "releaseAllPCM": shutdown()
+        default: throw RuntimeControllerError.invalidSession
         }
-        return try snapshot(refreshDevices: false)
+        return try snapshot(clientID: clientID, refreshDevices: command == "snapshot")
     }
 
-    func releasePCMForDSD() {
-        releasePCM()
+    func releasePCMForDSD(deviceUID: String?) {
+        if let deviceUID { releasePCM(deviceUID: deviceUID) }
     }
 
     func shutdown() {
-        releasePCM()
+        for uid in Array(leases.keys) { releasePCM(deviceUID: uid) }
     }
 
-    private func releasePCM() {
-        lock.lock()
-        let oldLease = lease
-        lease = nil
-        activeClientID = nil
-        if oldLease != nil { revision &+= 1 }
-        lock.unlock()
-        try? oldLease?.restore()
+    private func releasePCM(clientID: UUID) {
+        for uid in leases.keys.filter({ leases[$0]?.clientID == clientID }) { releasePCM(deviceUID: uid) }
     }
 
-    private func bumpRevision() {
-        lock.lock()
+    private func releasePCM(deviceUID: String) {
+        guard let old = leases.removeValue(forKey: deviceUID) else { return }
+        try? old.lease.restore()
         revision &+= 1
-        lock.unlock()
     }
 
-    private func snapshot(refreshDevices: Bool) throws -> [String: Any] {
+    private func snapshot(clientID: UUID, refreshDevices: Bool) throws -> [String: Any] {
         let devices: [HiFiAudioOutputDevice]
-        lock.lock()
-        let cachedDevices = self.cachedDevices
-        lock.unlock()
         if refreshDevices || cachedDevices == nil {
             devices = try CoreAudioDeviceCatalog.outputDevices()
-            lock.lock()
-            self.cachedDevices = devices
-            lock.unlock()
-        } else {
-            devices = cachedDevices ?? []
+            cachedDevices = devices
+        } else { devices = cachedDevices ?? [] }
+        for uid in Array(leases.keys) where !devices.contains(where: { $0.id == uid && $0.isConnected }) {
+            releasePCM(deviceUID: uid)
         }
-        // 独占设备离线后立刻释放 lease 并切回跟随系统默认，避免快照长期指向已不存在的设备。
         var preferredUID = UserDefaults.standard.string(forKey: preferenceKey)
-        if let uid = preferredUID,
-           devices.first(where: { $0.id == uid && $0.isConnected }) == nil {
-            releasePCM()
+        if let uid = preferredUID, !devices.contains(where: { $0.id == uid && $0.isConnected }) {
             UserDefaults.standard.removeObject(forKey: preferenceKey)
             preferredUID = nil
-            lock.lock()
-            self.cachedDevices = devices
             revision &+= 1
-            lock.unlock()
         }
-        lock.lock()
-        let activeLease = lease
-        let clientID = activeClientID
-        lock.unlock()
-        if let activeLease,
-           devices.first(where: { $0.id == activeLease.status.deviceUID && $0.isConnected }) == nil {
-            releasePCM()
-        }
-        lock.lock()
-        let validatedLease = lease
-        let validatedClientID = activeClientID
-        lock.unlock()
-        let activeStatus = try? validatedLease?.refreshStatus()
-        // lease 指向的设备已消失时 refreshStatus 可能仍返回旧值，此时不再对外暴露独占状态。
-        let activeDeviceStillPresent = activeStatus.flatMap { status in
-            devices.first(where: { $0.id == status.deviceUID && $0.isConnected })
-        } != nil
-        let effectiveClientID = activeDeviceStillPresent ? (validatedClientID ?? clientID) : nil
-        if !activeDeviceStillPresent, validatedLease != nil {
-            releasePCM()
-            if preferredUID != nil {
-                UserDefaults.standard.removeObject(forKey: preferenceKey)
-                preferredUID = nil
-            }
-        }
+        let owned = leases.values.first(where: { $0.clientID == clientID })
+        let activeStatus = try? owned?.lease.refreshStatus()
         let deviceObjects: [[String: Any]] = devices.map {
             [
                 "id": $0.id,
@@ -1115,29 +1063,19 @@ private final class AudioDeviceServiceController: @unchecked Sendable {
                 "supportedPCMSampleRates": $0.supportedPCMSampleRates
             ]
         }
-        lock.lock()
-        let finalRevision = revision
-        lock.unlock()
-        // 离线后强制回退为跟随系统默认，不再对外暴露已不存在的独占设备。
-        let effectivePreferredUID: String? = preferredUID.flatMap { uid in
-            devices.first(where: { $0.id == uid && $0.isConnected }) != nil ? uid : nil
-        }
         var result: [String: Any] = [
-            "contractVersion": 1,
-            "devices": deviceObjects,
-            "pcmRouteMode": effectivePreferredUID == nil ? "systemDefault" : "exclusiveDevice",
-            "revision": finalRevision
+            "contractVersion": 1, "devices": deviceObjects,
+            "pcmRouteMode": preferredUID == nil ? "systemDefault" : "exclusiveDevice",
+            "revision": revision
         ]
-        if let effectivePreferredUID { result["selectedPCMDeviceID"] = effectivePreferredUID }
-        if let effectiveClientID { result["activeClientID"] = effectiveClientID.uuidString }
-        if let activeStatus, activeDeviceStillPresent {
+        if let preferredUID { result["selectedPCMDeviceID"] = preferredUID }
+        if let activeStatus {
+            result["activeClientID"] = clientID.uuidString
             result["activeDeviceID"] = activeStatus.deviceUID
             result["activeSampleRate"] = activeStatus.activeSampleRate
             result["sourceSampleRate"] = activeStatus.sourceSampleRate
             result["sampleRateMatched"] = activeStatus.sampleRateMatched
-            if let device = devices.first(where: { $0.id == activeStatus.deviceUID }) {
-                result["statusDescription"] = device.displayName
-            }
+            result["statusDescription"] = devices.first(where: { $0.id == activeStatus.deviceUID })?.displayName
         }
         return result
     }
