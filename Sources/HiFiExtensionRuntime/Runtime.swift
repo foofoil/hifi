@@ -1003,12 +1003,20 @@ private final class AudioDeviceServiceController: @unchecked Sendable {
                 throw RuntimeControllerError.invalidSession
             }
             try stopDSDPlayback(uid)
-            releasePCM(clientID: clientID)
-            releasePCM(deviceUID: uid)
-            let lease = try PCMExclusiveDeviceLease(deviceUID: uid, sourceSampleRate: rate, channelCount: channels)
-            leases[uid] = (clientID, lease)
-            UserDefaults.standard.set(uid, forKey: preferenceKey)
-            revision &+= 1
+            if let current = leases[uid],
+               current.clientID == clientID,
+               current.lease.sourceSampleRate == rate,
+               current.lease.channelCount == channels {
+                // 租约仍在手（自然播完连播）：直接复用，不碰 hog 与 DAC 格式。
+                _ = try current.lease.refreshStatus()
+            } else {
+                releasePCM(clientID: clientID)
+                releasePCM(deviceUID: uid)
+                let lease = try PCMExclusiveDeviceLease(deviceUID: uid, sourceSampleRate: rate, channelCount: channels)
+                leases[uid] = (clientID, lease)
+                UserDefaults.standard.set(uid, forKey: preferenceKey)
+                revision &+= 1
+            }
         case "releasePCM": releasePCM(clientID: clientID)
         case "releaseAllPCM": shutdown()
         default: throw RuntimeControllerError.invalidSession

@@ -373,6 +373,9 @@ public enum CoreAudioHALFormatProbe {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
+        // 已不在自己手上（挂起后或从未持有）即视为已释放；空闲时 set 反而会变成一次新的获取。
+        let owner = try hogModeOwner(deviceID: deviceID, address: &address)
+        guard owner == getpid() else { return }
         var request = getpid()
         let status = AudioObjectSetPropertyData(
             deviceID,

@@ -11,6 +11,8 @@ public struct PCMExclusiveDeviceStatus: Equatable, Sendable {
 /// 为宿主 AVAudioEngine 持有 PCM 独占和设备格式；音频帧不会跨扩展 ABI。
 public final class PCMExclusiveDeviceLease: @unchecked Sendable {
     public private(set) var status: PCMExclusiveDeviceStatus
+    public let sourceSampleRate: Double
+    public let channelCount: Int
 
     private let deviceID: AudioDeviceID
     private let streamID: AudioStreamID
@@ -35,6 +37,8 @@ public final class PCMExclusiveDeviceLease: @unchecked Sendable {
             throw CoreAudioHALFormatProbeError.noOutputStream
         }
         streamID = selected.streamID
+        self.sourceSampleRate = sourceSampleRate
+        self.channelCount = channelCount
         originalNominalSampleRate = try Self.nominalSampleRate(deviceID: deviceID)
         originalPhysicalFormat = try CoreAudioHALFormatProbe.currentFormat(
             streamID: streamID,
