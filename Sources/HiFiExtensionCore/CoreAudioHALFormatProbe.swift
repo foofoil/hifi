@@ -320,7 +320,9 @@ public enum CoreAudioHALFormatProbe {
         )
         guard AudioObjectHasProperty(deviceID, &address) else { return false }
         let owner = try hogModeOwner(deviceID: deviceID, address: &address)
-        if owner == getpid() { return false }
+        // 本进程已持有则直接认领：租约释放时的恢复偶发失败会留下自持 hog，
+        // 若当失败抛出，该设备在进程重启前将永久独占失败，被迫逐个换设备。
+        if owner == getpid() { return true }
         guard owner == -1 else { throw CoreAudioHALFormatProbeError.deviceInUse(owner) }
         var request = getpid()
         let status = AudioObjectSetPropertyData(
