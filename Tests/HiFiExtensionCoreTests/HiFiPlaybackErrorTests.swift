@@ -44,6 +44,15 @@ struct HiFiPlaybackErrorTests {
         #expect(!CoreAudioHALFormatProbe.isDeviceAlive(AudioDeviceID(kAudioObjectUnknown)))
     }
 
+    @Test func waitForStableDeviceIDFailsForUnknownUID() {
+        #expect(throws: CoreAudioHALFormatProbeError.self) {
+            try CoreAudioHALFormatProbe.waitForStableDeviceID(
+                uid: "foofoil.missing-device.\(UUID().uuidString)",
+                attempts: 2
+            )
+        }
+    }
+
     @Test func explicitStopClearsACompletedSessionsDisconnectFailure() {
         let failed = HALDSFPlaybackStatus(
             state: .failed,

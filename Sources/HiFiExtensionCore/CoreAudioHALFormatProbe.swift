@@ -313,11 +313,7 @@ public enum CoreAudioHALFormatProbe {
     }
 
     static func acquireHogModeIfAvailable(deviceID: AudioDeviceID) throws -> Bool {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyHogMode,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = hogModeAddress
         guard AudioObjectHasProperty(deviceID, &address) else { return false }
         let owner = try hogModeOwner(deviceID: deviceID, address: &address)
         // 本进程已持有则直接认领：租约释放时的恢复偶发失败会留下自持 hog，
@@ -344,11 +340,7 @@ public enum CoreAudioHALFormatProbe {
     }
 
     static func supportsHogMode(deviceID: AudioDeviceID) -> Bool {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyHogMode,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = hogModeAddress
         var settable = DarwinBoolean(false)
         return AudioObjectHasProperty(deviceID, &address)
             && AudioObjectIsPropertySettable(deviceID, &address, &settable) == noErr
@@ -368,13 +360,14 @@ public enum CoreAudioHALFormatProbe {
     }
 
     static func releaseHogMode(deviceID: AudioDeviceID) throws {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyHogMode,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = hogModeAddress
         // 已不在自己手上（挂起后或从未持有）即视为已释放；空闲时 set 反而会变成一次新的获取。
-        let owner = try hogModeOwner(deviceID: deviceID, address: &address)
+        let owner: pid_t
+        do {
+            owner = try hogModeOwner(deviceID: deviceID, address: &address)
+        } catch {
+            return
+        }
         guard owner == getpid() else { return }
         var request = getpid()
         let status = AudioObjectSetPropertyData(
@@ -388,10 +381,48 @@ public enum CoreAudioHALFormatProbe {
         guard status == noErr else { throw CoreAudioHALFormatProbeError.hogModeReleaseFailed }
         // 部分 USB 驱动不会同步改写 SetPropertyData 的输入缓冲，必须重新读取实际 owner。
         for _ in 0..<50 {
-            if try hogModeOwner(deviceID: deviceID, address: &address) != getpid() { return }
+            if (try? hogModeOwner(deviceID: deviceID, address: &address)) != getpid() { return }
             usleep(20_000)
         }
         throw CoreAudioHALFormatProbeError.hogModeReleaseFailed
+    }
+
+    /// 格式切换常让 USB DAC 换实例；旧 AudioDeviceID 上的 hog 释放是空操作，必须按 UID 找到当前对象再归还。
+    static func releaseHogMode(uid: String, also deviceIDs: [AudioDeviceID] = []) {
+        var seen = Set<AudioDeviceID>()
+        var ids = deviceIDs
+        if let current = try? resolveDeviceID(uid: uid) { ids.append(current) }
+        for id in ids where seen.insert(id).inserted {
+            try? releaseHogMode(deviceID: id)
+        }
+    }
+
+    /// USB 改采样率后设备会短暂消失再以新 ID 出现；连续读到同一活实例才认为稳定。
+    static func waitForStableDeviceID(uid: String, attempts: Int = 150) throws -> AudioDeviceID {
+        var last = AudioDeviceID(kAudioObjectUnknown)
+        var stable = 0
+        var lastError: Error = CoreAudioHALFormatProbeError.deviceNotFound(uid)
+        for _ in 0..<max(1, attempts) {
+            do {
+                let id = try resolveDeviceID(uid: uid)
+                if isDeviceAlive(id) {
+                    if id == last {
+                        stable += 1
+                        if stable >= 8 { return id }
+                    } else {
+                        last = id
+                        stable = 1
+                    }
+                } else {
+                    stable = 0
+                }
+            } catch {
+                lastError = error
+                stable = 0
+            }
+            usleep(20_000)
+        }
+        throw lastError
     }
 
     static func hogModeOwner(
@@ -596,6 +627,14 @@ public enum CoreAudioHALFormatProbe {
             && lhs.mBitsPerChannel == rhs.mBitsPerChannel
             && lhs.mBytesPerFrame == rhs.mBytesPerFrame
             && lhs.mChannelsPerFrame == rhs.mChannelsPerFrame
+    }
+
+    private static var hogModeAddress: AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyHogMode,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
     }
 
     private static func physicalFormatAddress(

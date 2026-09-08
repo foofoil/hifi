@@ -14,8 +14,9 @@ public final class PCMExclusiveDeviceLease: @unchecked Sendable {
     public let sourceSampleRate: Double
     public let channelCount: Int
 
-    private let deviceID: AudioDeviceID
-    private let streamID: AudioStreamID
+    private let deviceUID: String
+    private var deviceID: AudioDeviceID
+    private var streamID: AudioStreamID
     private let originalNominalSampleRate: Double
     private let originalPhysicalFormat: AudioStreamBasicDescription
     private let originalVirtualFormat: AudioStreamBasicDescription
@@ -27,6 +28,9 @@ public final class PCMExclusiveDeviceLease: @unchecked Sendable {
         guard sourceSampleRate.isFinite, sourceSampleRate > 0, channelCount > 0 else {
             throw CoreAudioHALFormatProbeError.propertyNotSettable
         }
+        self.deviceUID = deviceUID
+        self.sourceSampleRate = sourceSampleRate
+        self.channelCount = channelCount
         deviceID = try CoreAudioHALFormatProbe.resolveDeviceID(uid: deviceUID)
         let streams = try CoreAudioHALFormatProbe.outputStreams(deviceID: deviceID)
         guard let selected = try Self.selectStream(
@@ -37,8 +41,6 @@ public final class PCMExclusiveDeviceLease: @unchecked Sendable {
             throw CoreAudioHALFormatProbeError.noOutputStream
         }
         streamID = selected.streamID
-        self.sourceSampleRate = sourceSampleRate
-        self.channelCount = channelCount
         originalNominalSampleRate = try Self.nominalSampleRate(deviceID: deviceID)
         originalPhysicalFormat = try CoreAudioHALFormatProbe.currentFormat(
             streamID: streamID,
@@ -58,11 +60,15 @@ public final class PCMExclusiveDeviceLease: @unchecked Sendable {
         )
 
         do {
+            if abs(originalNominalSampleRate - sourceSampleRate) >= 0.5 {
+                try Self.setNominalSampleRate(sourceSampleRate, deviceID: deviceID)
+                try refreshIdentity(waitForStability: true)
+                _ = try Self.waitForNominalSampleRate(sourceSampleRate, uid: deviceUID)
+                try refreshIdentity()
+                try reclaimHogIfNeeded()
+            }
             if let target = selected.targetFormat {
-                if abs(originalNominalSampleRate - sourceSampleRate) >= 0.5 {
-                    try Self.setNominalSampleRate(sourceSampleRate, deviceID: deviceID)
-                    _ = try Self.waitForNominalSampleRate(sourceSampleRate, deviceID: deviceID)
-                }
+                try refreshIdentity()
                 let activePhysicalFormat = try CoreAudioHALFormatProbe.currentFormat(
                     streamID: streamID,
                     selector: kAudioStreamPropertyPhysicalFormat
@@ -73,6 +79,7 @@ public final class PCMExclusiveDeviceLease: @unchecked Sendable {
                         streamID: streamID,
                         selector: kAudioStreamPropertyPhysicalFormat
                     )
+                    try refreshIdentity(waitForStability: true)
                     _ = try CoreAudioHALFormatProbe.waitForFormat(
                         target,
                         streamID: streamID,
@@ -80,6 +87,8 @@ public final class PCMExclusiveDeviceLease: @unchecked Sendable {
                     )
                 }
             }
+            try refreshIdentity()
+            try reclaimHogIfNeeded()
             let activeRate = try Self.nominalSampleRate(deviceID: deviceID)
             status = PCMExclusiveDeviceStatus(
                 deviceUID: deviceUID,
@@ -97,6 +106,7 @@ public final class PCMExclusiveDeviceLease: @unchecked Sendable {
 
     @discardableResult
     public func refreshStatus() throws -> PCMExclusiveDeviceStatus {
+        try refreshIdentity()
         let activeRate = try Self.nominalSampleRate(deviceID: deviceID)
         status = PCMExclusiveDeviceStatus(
             deviceUID: status.deviceUID,
@@ -116,59 +126,86 @@ public final class PCMExclusiveDeviceLease: @unchecked Sendable {
         restored = true
         lock.unlock()
 
-        guard CoreAudioHALFormatProbe.isDeviceAlive(deviceID) else {
-            if acquiredHogMode { try? CoreAudioHALFormatProbe.releaseHogMode(deviceID: deviceID) }
-            return
-        }
+        let previousDeviceID = deviceID
+        try? refreshIdentity(waitForStability: true)
         var firstError: Error?
-        do {
-            let current = try CoreAudioHALFormatProbe.currentFormat(
-                streamID: streamID,
-                selector: kAudioStreamPropertyVirtualFormat
-            )
-            if !CoreAudioHALFormatProbe.matches(current, originalVirtualFormat) {
-                try CoreAudioHALFormatProbe.setStreamFormat(
-                    originalVirtualFormat,
+        if CoreAudioHALFormatProbe.isDeviceAlive(deviceID) {
+            do {
+                let current = try CoreAudioHALFormatProbe.currentFormat(
                     streamID: streamID,
                     selector: kAudioStreamPropertyVirtualFormat
                 )
-                _ = try CoreAudioHALFormatProbe.waitForFormat(
-                    originalVirtualFormat,
-                    streamID: streamID,
-                    selector: kAudioStreamPropertyVirtualFormat
-                )
-            }
-        } catch { firstError = error }
-        do {
-            let current = try CoreAudioHALFormatProbe.currentFormat(
-                streamID: streamID,
-                selector: kAudioStreamPropertyPhysicalFormat
-            )
-            if !CoreAudioHALFormatProbe.matches(current, originalPhysicalFormat) {
-                try CoreAudioHALFormatProbe.setStreamFormat(
-                    originalPhysicalFormat,
-                    streamID: streamID,
-                    selector: kAudioStreamPropertyPhysicalFormat
-                )
-                _ = try CoreAudioHALFormatProbe.waitForFormat(
-                    originalPhysicalFormat,
+                if !CoreAudioHALFormatProbe.matches(current, originalVirtualFormat) {
+                    try CoreAudioHALFormatProbe.setStreamFormat(
+                        originalVirtualFormat,
+                        streamID: streamID,
+                        selector: kAudioStreamPropertyVirtualFormat
+                    )
+                    try refreshIdentity(waitForStability: true)
+                    _ = try CoreAudioHALFormatProbe.waitForFormat(
+                        originalVirtualFormat,
+                        streamID: streamID,
+                        selector: kAudioStreamPropertyVirtualFormat
+                    )
+                }
+            } catch { firstError = error }
+            do {
+                try refreshIdentity()
+                let current = try CoreAudioHALFormatProbe.currentFormat(
                     streamID: streamID,
                     selector: kAudioStreamPropertyPhysicalFormat
                 )
-            }
-        } catch { firstError = firstError ?? error }
-        do {
-            let current = try Self.nominalSampleRate(deviceID: deviceID)
-            if abs(current - originalNominalSampleRate) >= 0.5 {
-                try Self.setNominalSampleRate(originalNominalSampleRate, deviceID: deviceID)
-                _ = try Self.waitForNominalSampleRate(originalNominalSampleRate, deviceID: deviceID)
-            }
-        } catch { firstError = firstError ?? error }
+                if !CoreAudioHALFormatProbe.matches(current, originalPhysicalFormat) {
+                    try CoreAudioHALFormatProbe.setStreamFormat(
+                        originalPhysicalFormat,
+                        streamID: streamID,
+                        selector: kAudioStreamPropertyPhysicalFormat
+                    )
+                    try refreshIdentity(waitForStability: true)
+                    _ = try CoreAudioHALFormatProbe.waitForFormat(
+                        originalPhysicalFormat,
+                        streamID: streamID,
+                        selector: kAudioStreamPropertyPhysicalFormat
+                    )
+                }
+            } catch { firstError = firstError ?? error }
+            do {
+                try refreshIdentity()
+                let current = try Self.nominalSampleRate(deviceID: deviceID)
+                if abs(current - originalNominalSampleRate) >= 0.5 {
+                    try Self.setNominalSampleRate(originalNominalSampleRate, deviceID: deviceID)
+                    _ = try Self.waitForNominalSampleRate(originalNominalSampleRate, uid: deviceUID)
+                    try refreshIdentity(waitForStability: true)
+                }
+            } catch { firstError = firstError ?? error }
+        }
+        // 格式恢复失败也必须归还 hog；按 UID 找当前实例，旧 ID 在重枚举后已经无效。
         if acquiredHogMode {
-            do { try CoreAudioHALFormatProbe.releaseHogMode(deviceID: deviceID) }
-            catch { firstError = firstError ?? error }
+            CoreAudioHALFormatProbe.releaseHogMode(uid: deviceUID, also: [previousDeviceID, deviceID])
         }
         if let firstError { throw firstError }
+    }
+
+    /// USB 改格式后对象 ID 会换；后续 hog/格式操作必须打在当前实例上。
+    private func refreshIdentity(waitForStability: Bool = false) throws {
+        if waitForStability {
+            deviceID = try CoreAudioHALFormatProbe.waitForStableDeviceID(uid: deviceUID)
+        } else {
+            deviceID = try CoreAudioHALFormatProbe.resolveDeviceID(uid: deviceUID)
+            if !CoreAudioHALFormatProbe.isDeviceAlive(deviceID) {
+                deviceID = try CoreAudioHALFormatProbe.waitForStableDeviceID(uid: deviceUID)
+            }
+        }
+        let streams = try CoreAudioHALFormatProbe.outputStreams(deviceID: deviceID)
+        if !streams.contains(streamID) {
+            guard let next = streams.first else { throw CoreAudioHALFormatProbeError.noOutputStream }
+            streamID = next
+        }
+    }
+
+    private func reclaimHogIfNeeded() throws {
+        guard acquiredHogMode else { return }
+        _ = try CoreAudioHALFormatProbe.acquireHogModeIfAvailable(deviceID: deviceID)
     }
 
     private struct StreamSelection {
@@ -191,8 +228,10 @@ public final class PCMExclusiveDeviceLease: @unchecked Sendable {
             let candidates = try CoreAudioHALFormatProbe.availableFormats(streamID: streamID)
                 .compactMap { ranged -> AudioStreamBasicDescription? in
                     var format = ranged.mFormat
+                    // AVAudioEngine 只能走 mixable；non-mixable 会让 HAL 自行 hog，恢复失败时 Apple Music 也会被卡住。
                     guard format.mFormatID == kAudioFormatLinearPCM,
                           format.mChannelsPerFrame >= UInt32(channelCount),
+                          format.mFormatFlags & kAudioFormatFlagIsNonMixable == 0,
                           ranged.mSampleRateRange.mMinimum <= sourceSampleRate,
                           sourceSampleRate <= ranged.mSampleRateRange.mMaximum else { return nil }
                     format.mSampleRate = sourceSampleRate
@@ -245,11 +284,15 @@ public final class PCMExclusiveDeviceLease: @unchecked Sendable {
 
     private static func waitForNominalSampleRate(
         _ expected: Double,
-        deviceID: AudioDeviceID
+        uid: String
     ) throws -> Double {
-        for _ in 0..<50 {
-            let actual = try nominalSampleRate(deviceID: deviceID)
-            if abs(actual - expected) < 0.5 { return actual }
+        for _ in 0..<150 {
+            if let deviceID = try? CoreAudioHALFormatProbe.resolveDeviceID(uid: uid),
+               CoreAudioHALFormatProbe.isDeviceAlive(deviceID),
+               let actual = try? nominalSampleRate(deviceID: deviceID),
+               abs(actual - expected) < 0.5 {
+                return actual
+            }
             usleep(20_000)
         }
         throw CoreAudioHALFormatProbeError.formatChangeTimedOut
