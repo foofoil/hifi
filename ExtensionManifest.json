@@ -24,6 +24,7 @@
     }
   ],
   "capabilities": [
+    {"id": "session.lifecycle", "contractVersion": 1, "scope": "session"},
     {"id": "session.seekable", "contractVersion": 1, "scope": "session"},
     {"id": "media.playback-queue", "contractVersion": 1, "scope": "session"},
     {"id": "audio.device-selection", "contractVersion": 1, "scope": "application"},

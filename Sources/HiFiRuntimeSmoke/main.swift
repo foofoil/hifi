@@ -20,8 +20,9 @@ private struct RuntimeInterfaceV1 {
 @_silgen_name("foofoil_extension_create")
 private func createRuntime(_ version: UInt32) -> UnsafeRawPointer?
 
-guard CommandLine.arguments.count == 2 else {
-    FileHandle.standardError.write(Data("Usage: hifi-runtime-smoke <file.dsf|file.dff|--self-test>\n".utf8))
+guard CommandLine.arguments.count == 2
+    || (CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--self-test") else {
+    FileHandle.standardError.write(Data("Usage: hifi-runtime-smoke <file.dsf|file.dff|--self-test> [lifecycle-fixture.json]\n".utf8))
     exit(64)
 }
 
@@ -47,14 +48,14 @@ do {
           let releaseBytes = interface.pointee.releaseBytes else {
         throw SmokeError.invalidInterface
     }
-    func perform(_ commandID: String, session: [String: Any]) throws -> [String: Any] {
+    func perform(_ commandID: String, session: [String: Any], fields: [String: Any] = [:]) throws -> [String: Any] {
         guard let performCommand = interface.pointee.performCommand else {
             throw SmokeError.invalidInterface
         }
-        let message = try JSONSerialization.data(withJSONObject: [
-            "commandID": commandID,
-            "session": session
-        ])
+        var object = fields
+        object["commandID"] = commandID
+        object["session"] = session
+        let message = try JSONSerialization.data(withJSONObject: object)
         var commandResponse: UnsafeMutablePointer<UInt8>?
         var commandResponseLength = 0
         let commandStatus = message.withUnsafeBytes { bytes in
@@ -131,6 +132,71 @@ do {
               restored["state"] as? String == "paused",
               let position = restored["position"] as? Double, abs(position - 1) < 0.00001 else {
             throw SmokeError.invalidSession
+        }
+    }
+    if isSelfTest, CommandLine.arguments.count == 3 {
+        let fixtureURL = URL(fileURLWithPath: CommandLine.arguments[2])
+        let fixtures = try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as! [[String: Any]]
+        guard fixtures.count == 2,
+              fixtures[0]["operation"] as? String == "restore",
+              fixtures[1]["operation"] as? String == "close",
+              ((session["capabilities"] as? [[String: Any]])?.contains {
+                  ($0["declaration"] as? [String: Any])?["id"] as? String == "session.lifecycle"
+              }) == true else { throw SmokeError.invalidSession }
+
+        // 先用旧协议切到另一曲，再用共享 fixture 经真实 ABI 恢复，验证新旧入口共存。
+        finalSession = try perform("hifi.next", session: finalSession)
+        finalSession = try perform("session.lifecycle", session: finalSession, fields: fixtures[0])
+        guard (finalSession["playbackQueue"] as? [String: Any])?["currentItemID"] as? String == "file:1",
+              let restored = finalSession["mediaPlayback"] as? [String: Any],
+              restored["state"] as? String == "paused",
+              let position = restored["position"] as? Double, abs(position - 1) < 0.00001 else {
+            throw SmokeError.invalidSession
+        }
+
+        var missingTrack = fixtures[0]
+        missingTrack["restoration"] = ["currentItemID": "removed-track", "position": 0]
+        let unchanged = try perform("session.lifecycle", session: finalSession, fields: missingTrack)
+        guard (unchanged["mediaPlayback"] as? [String: Any])?["position"] as? Double == position else {
+            throw SmokeError.invalidSession
+        }
+        var pastEnd = fixtures[0]
+        pastEnd["restoration"] = ["currentItemID": "file:1", "position": 1000]
+        let clamped = try perform("session.lifecycle", session: finalSession, fields: pastEnd)
+        guard let clampedPlayback = clamped["mediaPlayback"] as? [String: Any],
+              let clampedPosition = clampedPlayback["position"] as? Double,
+              let duration = clampedPlayback["duration"] as? Double,
+              abs(clampedPosition - duration) < 0.00001,
+              clampedPlayback["state"] as? String == "paused" else {
+            throw SmokeError.invalidSession
+        }
+        finalSession = try perform("session.lifecycle", session: clamped, fields: fixtures[0])
+        let invalidMessages: [[String: Any]] = [
+            ["contractVersion": 2, "operation": "close"],
+            ["contractVersion": 1, "operation": "unknown"],
+            ["contractVersion": 1, "operation": "restore"],
+            ["contractVersion": 1, "operation": "restore", "restoration": ["position": -1]],
+            ["contractVersion": 1, "operation": "restore", "restoration": ["position": true]],
+            ["contractVersion": 1, "operation": "close", "restoration": [:]]
+        ]
+        for invalid in invalidMessages {
+            do {
+                _ = try perform("session.lifecycle", session: finalSession, fields: invalid)
+                throw SmokeError.invalidSession
+            } catch SmokeError.callFailed(1) {
+                // 无效消息在访问播放器前被拒绝。
+            }
+        }
+        finalSession = try perform("session.lifecycle", session: finalSession, fields: fixtures[1])
+        finalSession = try perform("session.lifecycle", session: finalSession, fields: fixtures[1])
+        guard (finalSession["mediaPlayback"] as? [String: Any])?["state"] as? String == "stopped" else {
+            throw SmokeError.invalidSession
+        }
+        do {
+            _ = try perform("hifi.status", session: finalSession)
+            throw SmokeError.invalidSession
+        } catch SmokeError.callFailed(3) {
+            // 关闭确实移除了运行时记录；重复 close 的成功不是重复使用旧会话。
         }
     }
     let pretty = try JSONSerialization.data(withJSONObject: finalSession, options: [.prettyPrinted, .sortedKeys])

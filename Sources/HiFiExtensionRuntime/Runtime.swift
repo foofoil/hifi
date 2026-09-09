@@ -108,8 +108,25 @@ private let performCommandCallback: RuntimeCall = { _, input, inputLength, outpu
           var session = message["session"] as? [String: Any] else {
         return RuntimeStatus.invalidMessage
     }
+    let lifecycle: SessionLifecycleMessage?
+    if commandID == "session.lifecycle" {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: message)
+            let decoded = try JSONDecoder().decode(SessionLifecycleMessage.self, from: data)
+            try decoded.validate()
+            lifecycle = decoded
+        } catch {
+            return RuntimeStatus.invalidMessage
+        }
+    } else {
+        lifecycle = nil
+    }
     do {
-        try runtimeController.perform(commandID: commandID, session: &session)
+        if let lifecycle {
+            try runtimeController.perform(lifecycle: lifecycle, session: &session)
+        } else {
+            try runtimeController.perform(commandID: commandID, session: &session)
+        }
     } catch {
         return RuntimeStatus.processingFailed
     }
@@ -293,6 +310,7 @@ private func makeSession(
         selection["statusDescription"] = selected.displayName
     }
     var capabilities = [
+        capability("session.lifecycle", "session"),
         capability("session.seekable", "session"),
         capability("audio.device-selection", "application"),
         capability("ui.commands", "presentation")
@@ -408,6 +426,45 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         lock.lock()
         sessions[id] = record
         lock.unlock()
+    }
+
+    /// 恢复只作用于未播放的活会话，曲目选择与位置校验留在扩展内。
+    func perform(lifecycle: SessionLifecycleMessage, session: inout [String: Any]) throws {
+        guard let idString = session["id"] as? String, let id = UUID(uuidString: idString) else {
+            throw RuntimeControllerError.invalidSession
+        }
+        lock.lock()
+        let record = sessions[id]
+        lock.unlock()
+        if lifecycle.operation == .close {
+            // 已关闭的会话重复关闭仍成功，不重新创建记录或接触硬件。
+            if let record { try close(record) }
+            var playback = session["mediaPlayback"] as? [String: Any] ?? [:]
+            playback["state"] = "stopped"
+            session["mediaPlayback"] = playback
+            return
+        }
+        guard let record, let restoration = lifecycle.restoration else {
+            throw RuntimeControllerError.invalidSession
+        }
+        guard !record.isActive else { throw LifecycleMessageError.activeSession }
+        if let itemID = restoration.currentItemID,
+           !record.sources.contains(where: { $0.id == itemID }) {
+            // 文件被替换或曲目消失时，不把旧曲目的进度套到其他曲目。
+            return
+        }
+        try perform(commandID: "hifi.pause", session: &session)
+        if let itemID = restoration.currentItemID {
+            switchItem(to: itemID, record: record)
+        }
+        if let position = restoration.position {
+            var playback = session["mediaPlayback"] as? [String: Any] ?? [:]
+            playback["position"] = position
+            session["mediaPlayback"] = playback
+            try perform(commandID: "hifi.seek", session: &session)
+        }
+        updatePlaybackState(for: record, session: &session)
+        updateQueueState(for: record, session: &session)
     }
 
     func perform(commandID: String, session: inout [String: Any]) throws {
@@ -563,7 +620,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 record: record
             )
         case "hifi.close":
-            close(record)
+            try close(record)
         default:
             if commandID.hasPrefix("hifi.device.") {
                 let selectedID = String(commandID.dropFirst("hifi.device.".count))
@@ -757,13 +814,14 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         if let uid = record.selectedDeviceID { try stopPlayback(on: uid) }
     }
 
-    private func close(_ record: RuntimeSession) {
+    private func close(_ record: RuntimeSession) throws {
         lock.lock()
         let wasPlaying = record.isActive
-        if wasPlaying { record.isActive = false }
         lock.unlock()
-        if wasPlaying { _ = try? record.player.stop() }
+        // 释放失败不能报告关闭成功，也不能先删除记录导致无法重试。
+        if wasPlaying { _ = try record.player.stop() }
         lock.lock()
+        record.isActive = false
         sessions.removeValue(forKey: record.id)
         lock.unlock()
     }
