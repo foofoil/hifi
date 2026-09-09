@@ -24,6 +24,8 @@
     }
   ],
   "capabilities": [
+    {"id": "media.transport", "contractVersion": 1, "scope": "session"},
+    {"id": "ui.navigator-actions", "contractVersion": 1, "scope": "presentation"},
     {"id": "session.lifecycle", "contractVersion": 1, "scope": "session"},
     {"id": "session.seekable", "contractVersion": 1, "scope": "session"},
     {"id": "media.playback-queue", "contractVersion": 1, "scope": "session"},

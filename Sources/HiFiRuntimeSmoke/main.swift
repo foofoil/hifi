@@ -21,8 +21,8 @@ private struct RuntimeInterfaceV1 {
 private func createRuntime(_ version: UInt32) -> UnsafeRawPointer?
 
 guard CommandLine.arguments.count == 2
-    || (CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--self-test") else {
-    FileHandle.standardError.write(Data("Usage: hifi-runtime-smoke <file.dsf|file.dff|--self-test> [lifecycle-fixture.json]\n".utf8))
+    || ((3...4).contains(CommandLine.arguments.count) && CommandLine.arguments[1] == "--self-test") else {
+    FileHandle.standardError.write(Data("Usage: hifi-runtime-smoke <file.dsf|file.dff|--self-test> [lifecycle-fixture.json] [media-navigation-fixture.json]\n".utf8))
     exit(64)
 }
 
@@ -134,7 +134,52 @@ do {
             throw SmokeError.invalidSession
         }
     }
-    if isSelfTest, CommandLine.arguments.count == 3 {
+    if isSelfTest, CommandLine.arguments.count == 4 {
+        let fixtureURL = URL(fileURLWithPath: CommandLine.arguments[3])
+        let fixtures = try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as! [[String: Any]]
+        guard fixtures.count == 7 else { throw SmokeError.invalidSession }
+        for (index, fixture) in fixtures.enumerated() {
+            guard let commandID = fixture["commandID"] as? String else { throw SmokeError.invalidSession }
+            finalSession = try perform(commandID, session: finalSession, fields: fixture)
+            guard (finalSession["mediaPlayback"] as? [String: Any])?["state"] as? String == "paused" else {
+                throw SmokeError.invalidSession
+            }
+            if index == 1 {
+                guard let position = (finalSession["mediaPlayback"] as? [String: Any])?["position"] as? Double,
+                      abs(position - 0.5) < 0.00001 else { throw SmokeError.invalidSession }
+            }
+            if index >= 3 {
+                let expectedID = index == 5 ? "file:1" : "file:0"
+                guard (finalSession["playbackQueue"] as? [String: Any])?["currentItemID"] as? String == expectedID else {
+                    throw SmokeError.invalidSession
+                }
+            }
+            if index == 4 {
+                let ids = ((finalSession["playbackQueue"] as? [String: Any])?["items"] as? [[String: Any]])?.compactMap { $0["id"] as? String }
+                guard ids == ["file:0", "file:1"] else { throw SmokeError.invalidSession }
+            }
+        }
+        for action: [String: Any] in [
+            ["kind": "unknown"], ["kind": "seek", "position": -1], ["kind": "seek", "position": true],
+            ["kind": "seek"], ["kind": "selectDevice", "deviceID": ""]
+        ] {
+            do {
+                _ = try perform("media.transport", session: finalSession, fields: ["contractVersion": 1, "action": action])
+                throw SmokeError.invalidSession
+            } catch SmokeError.callFailed(1) {}
+        }
+        for action: [String: Any] in [
+            ["contributionID": "missing", "kind": "activate", "itemIDs": ["file:0"]],
+            ["contributionID": "hifi.playback-queue", "kind": "remove", "itemIDs": ["file:0"]],
+            ["contributionID": "hifi.playback-queue", "kind": "move", "itemIDs": ["file:0"], "movePosition": "before", "destinationItemID": "file:0"]
+        ] {
+            do {
+                _ = try perform("ui.navigator.action", session: finalSession, fields: ["contractVersion": 1, "action": action])
+                throw SmokeError.invalidSession
+            } catch SmokeError.callFailed(3) {}
+        }
+    }
+    if isSelfTest, CommandLine.arguments.count >= 3 {
         let fixtureURL = URL(fileURLWithPath: CommandLine.arguments[2])
         let fixtures = try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as! [[String: Any]]
         guard fixtures.count == 2,
@@ -170,7 +215,14 @@ do {
               clampedPlayback["state"] as? String == "paused" else {
             throw SmokeError.invalidSession
         }
-        finalSession = try perform("session.lifecycle", session: clamped, fields: fixtures[0])
+        var otherTrack = fixtures[0]
+        otherTrack["restoration"] = ["currentItemID": "file:0", "position": 0]
+        let fromEnd = try perform("session.lifecycle", session: clamped, fields: otherTrack)
+        guard (fromEnd["mediaPlayback"] as? [String: Any])?["state"] as? String == "paused",
+              (fromEnd["playbackQueue"] as? [String: Any])?["currentItemID"] as? String == "file:0" else {
+            throw SmokeError.invalidSession
+        }
+        finalSession = try perform("session.lifecycle", session: fromEnd, fields: fixtures[0])
         let invalidMessages: [[String: Any]] = [
             ["contractVersion": 2, "operation": "close"],
             ["contractVersion": 1, "operation": "unknown"],

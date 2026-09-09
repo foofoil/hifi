@@ -18,6 +18,7 @@ let package = Package(
         .executableTarget(name: "HiFiInspect", dependencies: ["HiFiExtensionCore"]),
         .executableTarget(name: "HiFiRuntimeSmoke", dependencies: ["HiFiExtensionRuntime"]),
         .executableTarget(name: "HiFiHALProbe", dependencies: ["HiFiExtensionCore"]),
-        .testTarget(name: "HiFiExtensionCoreTests", dependencies: ["HiFiExtensionCore"])
+        .testTarget(name: "HiFiExtensionCoreTests", dependencies: ["HiFiExtensionCore"]),
+        .testTarget(name: "HiFiExtensionRuntimeTests", dependencies: ["HiFiExtensionRuntime"])
     ]
 )

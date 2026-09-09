@@ -103,15 +103,31 @@ private func prepareSources(request: [String: Any]) throws -> [RuntimeSource] {
 private let performCommandCallback: RuntimeCall = { _, input, inputLength, output, outputLength in
     runtimeControlLock.lock()
     defer { runtimeControlLock.unlock() }
-    guard let message = jsonObject(input, length: inputLength),
+    guard let input, let message = jsonObject(input, length: inputLength),
           let commandID = message["commandID"] as? String,
           var session = message["session"] as? [String: Any] else {
         return RuntimeStatus.invalidMessage
     }
     let lifecycle: SessionLifecycleMessage?
+    let media: MediaPlaybackMessage?
+    let navigation: NavigatorActionMessage?
+    if commandID == "media.transport" || commandID == "ui.navigator.action" {
+        do {
+            let data = Data(bytes: input, count: inputLength)
+            media = commandID == "media.transport" ? try JSONDecoder().decode(MediaPlaybackMessage.self, from: data) : nil
+            navigation = commandID == "ui.navigator.action" ? try JSONDecoder().decode(NavigatorActionMessage.self, from: data) : nil
+            try media?.validate()
+            try navigation?.validate()
+        } catch {
+            return RuntimeStatus.invalidMessage
+        }
+    } else {
+        media = nil
+        navigation = nil
+    }
     if commandID == "session.lifecycle" {
         do {
-            let data = try JSONSerialization.data(withJSONObject: message)
+            let data = Data(bytes: input, count: inputLength)
             let decoded = try JSONDecoder().decode(SessionLifecycleMessage.self, from: data)
             try decoded.validate()
             lifecycle = decoded
@@ -124,6 +140,15 @@ private let performCommandCallback: RuntimeCall = { _, input, inputLength, outpu
     do {
         if let lifecycle {
             try runtimeController.perform(lifecycle: lifecycle, session: &session)
+        } else if let media {
+            if media.action.kind == .seek {
+                var playback = session["mediaPlayback"] as? [String: Any] ?? [:]
+                playback["position"] = media.action.position
+                session["mediaPlayback"] = playback
+            }
+            try runtimeController.perform(commandID: media.runtimeCommand, session: &session)
+        } else if let navigation {
+            try runtimeController.perform(navigation: navigation, session: &session)
         } else {
             try runtimeController.perform(commandID: commandID, session: &session)
         }
@@ -310,12 +335,14 @@ private func makeSession(
         selection["statusDescription"] = selected.displayName
     }
     var capabilities = [
+        capability("media.transport", "session"),
         capability("session.lifecycle", "session"),
         capability("session.seekable", "session"),
         capability("audio.device-selection", "application"),
         capability("ui.commands", "presentation")
     ]
     if sources.count > 1 {
+        capabilities.append(capability("ui.navigator-actions", "presentation"))
         capabilities.append(capability("media.playback-queue", "session"))
         capabilities.append(capability("ui.navigator", "presentation"))
     }
@@ -455,7 +482,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
         try perform(commandID: "hifi.pause", session: &session)
         if let itemID = restoration.currentItemID {
-            switchItem(to: itemID, record: record)
+            switchItem(to: itemID, record: record, allowsAutomaticPlayback: false)
         }
         if let position = restoration.position {
             var playback = session["mediaPlayback"] as? [String: Any] ?? [:]
@@ -465,6 +492,31 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
         updatePlaybackState(for: record, session: &session)
         updateQueueState(for: record, session: &session)
+    }
+
+    func perform(navigation: NavigatorActionMessage, session: inout [String: Any]) throws {
+        guard let idString = session["id"] as? String, let id = UUID(uuidString: idString) else {
+            throw RuntimeControllerError.invalidSession
+        }
+        lock.lock()
+        let record = sessions[id]
+        lock.unlock()
+        guard let record else { throw RuntimeControllerError.invalidSession }
+        let orderedIDs = try navigation.orderedIDs(
+            in: record.sources.map(\.id), canMove: !record.sources.contains { $0.sacdTrackNumber != nil }
+        )
+        var contribution = navigatorObject(sources: record.sources, currentID: record.sources[record.currentIndex].id)
+        let command: String
+        if navigation.action.kind == .activate {
+            contribution["selectedItemIDs"] = navigation.action.itemIDs
+            command = "hifi.navigator.activate"
+        } else {
+            guard let items = contribution["items"] as? [[String: Any]] else { throw RuntimeControllerError.invalidQueueOrder }
+            contribution["items"] = orderedIDs.compactMap { id in items.first { $0["id"] as? String == id } }
+            command = "hifi.navigator.move"
+        }
+        session["navigatorContributions"] = [contribution]
+        try perform(commandID: command, session: &session)
     }
 
     func perform(commandID: String, session: inout [String: Any]) throws {
@@ -826,7 +878,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func switchItem(to targetID: String, record: RuntimeSession) {
+    private func switchItem(to targetID: String, record: RuntimeSession, allowsAutomaticPlayback: Bool = true) {
         guard let index = record.sources.firstIndex(where: { $0.id == targetID }), index != record.currentIndex else { return }
         lock.lock()
         let wasPlaying = record.isActive
@@ -837,7 +889,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         let reachedEnd = record.sampleCount > 0 && record.samplePosition + 16 >= record.sampleCount
         let completedNaturally = record.playbackState == "stopped"
             || (record.playbackState == "paused" && reachedEnd)
-        let shouldPlay = wasPlaying || completedNaturally
+        let shouldPlay = allowsAutomaticPlayback && (wasPlaying || completedNaturally)
         record.currentIndex = index
         record.queueRevision &+= 1
         record.samplePosition = 0
