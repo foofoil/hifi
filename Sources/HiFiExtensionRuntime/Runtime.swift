@@ -422,6 +422,32 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
         lock.unlock()
 
+        synchronizeItem(for: record, status: record.player.status())
+
+        if let queue = session["playbackQueue"] as? [String: Any],
+           let items = queue["items"] as? [[String: Any]] {
+            let ids = items.compactMap { $0["id"] as? String }
+            let oldSuccessors = record.successors.map(\.id)
+            record.sequenceIDs = ids
+            if commandID == "hifi.status", record.isActive, oldSuccessors != record.successors.map(\.id) {
+                let status = try record.player.stop()
+                synchronizeItem(for: record, status: status)
+                record.samplePosition = status.samplePosition
+                record.isActive = false
+                if let deviceUID = record.selectedDeviceID {
+                    do {
+                        try record.player.play(fileAt: record.url, deviceUID: deviceUID,
+                                               startingSample: record.samplePosition, sacdTrackNumber: record.sacdTrackNumber,
+                                               itemID: record.sources[record.currentIndex].id, successors: record.successors)
+                        record.isActive = true
+                    } catch {
+                        record.playbackState = "failed"
+                        record.failureDescription = failureKey(error)
+                    }
+                }
+            }
+        }
+
         // 每次命令前用系统最新设备列表刷新会话，避免独占设备离线后菜单与状态卡在已不存在的设备上。
         refreshDeviceSelection(for: record, session: &session)
 
@@ -440,7 +466,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                     fileAt: record.url,
                     deviceUID: deviceUID,
                     startingSample: record.samplePosition,
-                    sacdTrackNumber: record.sacdTrackNumber
+                    sacdTrackNumber: record.sacdTrackNumber,
+                    itemID: record.sources[record.currentIndex].id,
+                    successors: record.successors
                 )
                 record.playbackState = "playing"
                 record.underrunCount = 0
@@ -462,6 +490,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             // 恢复后尚未起播的会话保留 seek 位置，也不能停止另一窗口持有的输出。
             if ownsPlayer {
                 let status = try record.player.stop()
+                synchronizeItem(for: record, status: status)
                 record.samplePosition = status.samplePosition
                 record.underrunCount = status.underrunCount
                 record.failureDescription = status.failureDescription
@@ -497,7 +526,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                         fileAt: record.url,
                         deviceUID: deviceUID,
                         startingSample: targetSample,
-                        sacdTrackNumber: record.sacdTrackNumber
+                        sacdTrackNumber: record.sacdTrackNumber,
+                        itemID: record.sources[record.currentIndex].id,
+                        successors: record.successors
                     )
                     record.playbackState = "playing"
                     record.failureDescription = nil
@@ -561,6 +592,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         lock.unlock()
         for record in records {
             let status = try record.player.stop()
+            synchronizeItem(for: record, status: status)
             record.isActive = false
             record.samplePosition = status.samplePosition
             record.underrunCount = status.underrunCount
@@ -574,7 +606,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
     private func refreshDeviceSelection(for record: RuntimeSession, session: inout [String: Any]) {
         guard let freshDevices = try? CoreAudioDeviceCatalog.outputDevices() else { return }
         guard var selection = session["audioDeviceSelection"] as? [String: Any],
-              var commands = session["commands"] as? [[String: Any]] else { return }
+              let commands = session["commands"] as? [[String: Any]] else { return }
         let sampleRate = record.sampleRate
         let deviceObjects: [[String: Any]] = freshDevices.map {
             [
@@ -598,6 +630,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             lock.unlock()
             if wasPlaying {
                 if let status = try? record.player.stop() {
+                    synchronizeItem(for: record, status: status)
                     record.samplePosition = status.samplePosition
                     record.underrunCount = status.underrunCount
                 }
@@ -677,6 +710,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         lock.unlock()
         if wasPlaying {
             let status = try record.player.stop()
+            synchronizeItem(for: record, status: status)
             record.samplePosition = status.samplePosition
             record.underrunCount = status.underrunCount
             record.playbackState = "paused"
@@ -700,7 +734,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                     fileAt: record.url,
                     deviceUID: selectedID,
                     startingSample: record.samplePosition,
-                    sacdTrackNumber: record.sacdTrackNumber
+                    sacdTrackNumber: record.sacdTrackNumber,
+                    itemID: record.sources[record.currentIndex].id,
+                    successors: record.successors
                 )
                 record.playbackState = "playing"
                 record.failureDescription = nil
@@ -757,7 +793,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 try record.player.play(
                     fileAt: record.url,
                     deviceUID: deviceUID,
-                    sacdTrackNumber: record.sacdTrackNumber
+                    sacdTrackNumber: record.sacdTrackNumber,
+                    itemID: record.sources[record.currentIndex].id,
+                    successors: record.successors
                 )
                 record.playbackState = "playing"
                 lock.lock(); record.isActive = true; lock.unlock()
@@ -781,9 +819,29 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         let reordered = orderedIDs.compactMap { sourcesByID[$0] }
         guard reordered.map(\.id) != record.sources.map(\.id),
               let currentIndex = reordered.firstIndex(where: { $0.id == currentID }) else { return }
+        let wasPlaying = record.isActive
+        if wasPlaying {
+            let status = try record.player.stop()
+            synchronizeItem(for: record, status: status)
+            record.samplePosition = status.samplePosition
+            record.isActive = false
+        }
+        let audibleID = record.sources[record.currentIndex].id
         record.sources = reordered
-        record.currentIndex = currentIndex
+        record.sequenceIDs = reordered.map(\.id)
+        record.currentIndex = reordered.firstIndex(where: { $0.id == audibleID }) ?? currentIndex
         record.queueRevision &+= 1
+        if wasPlaying, let deviceUID = record.selectedDeviceID {
+            do {
+                try record.player.play(fileAt: record.url, deviceUID: deviceUID,
+                                       startingSample: record.samplePosition, sacdTrackNumber: record.sacdTrackNumber,
+                                       itemID: audibleID, successors: record.successors)
+                record.isActive = true
+            } catch {
+                record.playbackState = "failed"
+                record.failureDescription = failureKey(error)
+            }
+        }
     }
 
     private func updateQueueState(for record: RuntimeSession, session: inout [String: Any]) {
@@ -805,23 +863,35 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
     }
 
+    private func synchronizeItem(for record: RuntimeSession, status: HALDSFPlaybackStatus) {
+        guard record.isActive, let itemID = status.currentItemID,
+              let index = record.sources.firstIndex(where: { $0.id == itemID }),
+              index != record.currentIndex else { return }
+        record.currentIndex = index
+        record.queueRevision &+= 1
+        record.samplePosition = status.samplePosition
+    }
+
     private func updatePlaybackState(for record: RuntimeSession, session: inout [String: Any]) {
         var status = record.player.status()
+        synchronizeItem(for: record, status: status)
         lock.lock()
         let shouldAdvance = record.isActive
             && status.state == .stopped
             && status.samplePosition >= record.sampleCount
-            && record.currentIndex + 1 < record.sources.count
+            && !record.successors.isEmpty
             && !record.isSACDContainer
         lock.unlock()
         if shouldAdvance {
+            synchronizeItem(for: record, status: status)
             record.samplePosition = status.samplePosition
-            switchItem(to: record.sources[record.currentIndex + 1].id, record: record)
+            switchItem(to: record.successors[0].id, record: record)
             status = record.player.status()
         }
         lock.lock()
         let wasTracked = record.isActive
         if wasTracked {
+            synchronizeItem(for: record, status: status)
             record.samplePosition = status.samplePosition
             record.underrunCount = status.underrunCount
         }
@@ -901,6 +971,15 @@ private final class RuntimeSession {
     var sampleRate: Int { sources[currentIndex].descriptor.sampleRate }
     var sampleCount: UInt64 { sources[currentIndex].descriptor.sampleCount ?? 0 }
     var sacdTrackNumber: Int? { sources[currentIndex].sacdTrackNumber }
+    var sequenceIDs: [String]?
+    var successors: [DSDPlaybackItem] {
+        let orderedIDs = sequenceIDs ?? sources.map(\.id)
+        guard let index = orderedIDs.firstIndex(of: sources[currentIndex].id) else { return [] }
+        let byID = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
+        return orderedIDs.dropFirst(index + 1).compactMap { byID[$0] }.map {
+            DSDPlaybackItem(id: $0.id, url: $0.url, descriptor: $0.descriptor, sacdTrackNumber: $0.sacdTrackNumber)
+        }
+    }
     var isSACDContainer: Bool { sources.contains { $0.sacdTrackNumber != nil } }
     let player = HALDSFPlaybackEngine()
     var isActive = false

@@ -16,6 +16,7 @@ public struct HALDSFPlaybackStatus: Codable, Equatable, Sendable {
     public let underrunCount: UInt64
     public let outputChannelCount: Int
     public let failureDescription: String?
+    public var currentItemID: String? = nil
 
     func stoppedClearingFailure() -> Self {
         Self(
@@ -24,7 +25,8 @@ public struct HALDSFPlaybackStatus: Codable, Equatable, Sendable {
             sampleCount: sampleCount,
             underrunCount: underrunCount,
             outputChannelCount: outputChannelCount,
-            failureDescription: nil
+            failureDescription: nil,
+            currentItemID: currentItemID
         )
     }
 }
@@ -69,7 +71,9 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
         fileAt url: URL,
         deviceUID: String,
         startingSample: UInt64 = 0,
-        sacdTrackNumber: Int? = nil
+        sacdTrackNumber: Int? = nil,
+        itemID: String? = nil,
+        successors: [DSDPlaybackItem] = []
     ) throws {
         try stop()
         let descriptor: DSDContainerDescriptor
@@ -119,10 +123,19 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
                 stream: stream,
                 physicalFormat: CoreAudioHALFormatProbe.describe(configured.physicalFormat)
             )
+            let physicalFormat = CoreAudioHALFormatProbe.describe(configured.physicalFormat)
+            let sequence = DoPPlaybackSequence(
+                source: source, itemID: itemID, startingSample: startingSample, successors: successors
+            ) { item in
+                guard item.descriptor.compression == .rawDSD,
+                      item.descriptor.sampleRate == descriptor.sampleRate,
+                      let outputMap = item.descriptor.playbackOutputMaps().first(where: { $0.count == selected.outputMap.count }) else { return nil }
+                return try DSFDoPSource(fileAt: item.url, physicalFormat: physicalFormat,
+                                        outputMap: outputMap, sacdTrackNumber: item.sacdTrackNumber)
+            }
             let session = PlaybackSession(
                 configuredDevice: configured,
-                source: source,
-                startingSample: startingSample
+                source: sequence
             )
             try session.prefill()
             try session.startIO()
@@ -354,8 +367,7 @@ private final class PlaybackSession: @unchecked Sendable {
     private static let prebufferFrames = 32_768
 
     let configuredDevice: ConfiguredDevice
-    let source: DSFDoPSource
-    let startingSample: UInt64
+    let source: DoPPlaybackSequence
     let channelCount: Int
 
     private let ring: SPSCFloatRingBuffer
@@ -366,10 +378,9 @@ private final class PlaybackSession: @unchecked Sendable {
     private var ioProcID: AudioDeviceIOProcID?
     private var outputTimeline: DoPOutputTimeline
 
-    init(configuredDevice: ConfiguredDevice, source: DSFDoPSource, startingSample: UInt64) {
+    init(configuredDevice: ConfiguredDevice, source: DoPPlaybackSequence) {
         self.configuredDevice = configuredDevice
         self.source = source
-        self.startingSample = startingSample
         channelCount = max(1, Int(configuredDevice.physicalFormat.mChannelsPerFrame))
         ring = SPSCFloatRingBuffer(capacityFrames: Self.ringCapacityFrames, channelCount: channelCount)
         let format = CoreAudioHALFormatProbe.describe(configuredDevice.physicalFormat)
@@ -465,16 +476,15 @@ private final class PlaybackSession: @unchecked Sendable {
         state: HALDSFPlaybackState,
         failureDescription: String? = nil
     ) -> HALDSFPlaybackStatus {
-        HALDSFPlaybackStatus(
+        let position = source.position(consumedFrames: consumedFrames.load(ordering: .acquiring))
+        return HALDSFPlaybackStatus(
             state: state,
-            samplePosition: min(
-                startingSample + consumedFrames.load(ordering: .acquiring) * 16,
-                source.sampleCount
-            ),
-            sampleCount: source.sampleCount,
+            samplePosition: position.samplePosition,
+            sampleCount: position.sampleCount,
             underrunCount: underrunCount.load(ordering: .acquiring),
             outputChannelCount: channelCount,
-            failureDescription: failureDescription
+            failureDescription: failureDescription,
+            currentItemID: position.itemID
         )
     }
 

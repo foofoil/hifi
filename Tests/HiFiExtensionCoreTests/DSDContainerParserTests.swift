@@ -391,6 +391,64 @@ struct DSDContainerParserTests {
         #expect(try source.read(maximumDoPFrames: 1).isEmpty)
     }
 
+    @Test func gaplessSequencePreservesPayloadAndAudibleBoundaries() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("gapless-\(UUID()).dsf")
+        defer { try? FileManager.default.removeItem(at: url) }
+        // 每曲 3 个 DoP 帧，验证奇数帧边界上的 marker 相位也保持交替。
+        try makeDSF(sampleRate: 2_822_400, channels: 2, sampleCount: 48, blockSize: 6,
+                    audioPayload: Data([0x88, 0x44, 0xCC, 0x22, 0xAA, 0x66,
+                                        0x88, 0x44, 0xCC, 0x22, 0xAA, 0x66])).write(to: url)
+        let format = physicalFormat(rate: 176_400, bits: 32)
+        let descriptor = try DSDContainerParser.parse(fileAt: url)
+        let sequence = DoPPlaybackSequence(
+            source: try DSFDoPSource(fileAt: url, physicalFormat: format), itemID: "a", startingSample: 0,
+            successors: ["b", "c"].map { DSDPlaybackItem(id: $0, url: url, descriptor: descriptor) }
+        ) { try DSFDoPSource(fileAt: $0.url, physicalFormat: format) }
+        var samples: [Float32] = []
+        while true {
+            let chunk = try sequence.read(maximumDoPFrames: 2)
+            if chunk.isEmpty { break }
+            samples += chunk
+        }
+        #expect(samples.count == 18)
+        #expect(sequence.position(consumedFrames: 2) == .init(itemID: "a", samplePosition: 32, sampleCount: 48))
+        #expect(sequence.position(consumedFrames: 3) == .init(itemID: "b", samplePosition: 0, sampleCount: 48))
+        #expect(sequence.position(consumedFrames: 7) == .init(itemID: "c", samplePosition: 16, sampleCount: 48))
+        #expect(sequence.position(consumedFrames: 9) == .init(itemID: "c", samplePosition: 48, sampleCount: 48))
+        var timeline = DoPOutputTimeline(format: format, channelCount: 2)
+        samples.withUnsafeMutableBufferPointer {
+            timeline.render(interleavedSamples: $0.baseAddress!, sourceFrameCount: 9, totalFrameCount: 9)
+        }
+        let words = physicalWords(samples)
+        for frame in 0..<9 {
+            let payload: UInt32 = [0x1122, 0x3344, 0x5566][frame % 3]
+            let marker: UInt32 = frame.isMultiple(of: 2) ? 0x05 : 0xFA
+            #expect(words[frame * 2] == (marker << 24 | payload << 8))
+            #expect(words[frame * 2 + 1] == words[frame * 2])
+        }
+    }
+
+    @Test func gaplessSequenceStopsAtIncompatibleSuccessorAndKeepsSeekOffset() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("gapless-\(UUID()).dsf")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try makeDSF(sampleRate: 2_822_400, channels: 2, sampleCount: 32, blockSize: 4,
+                    audioPayload: Data(repeating: 0x69, count: 8)).write(to: url)
+        let format = physicalFormat(rate: 176_400, bits: 32)
+        let descriptor = try DSDContainerParser.parse(fileAt: url)
+        let source = try DSFDoPSource(fileAt: url, physicalFormat: format)
+        try source.seek(toSample: 16)
+        var opened: [String] = []
+        let sequence = DoPPlaybackSequence(source: source, itemID: "a", startingSample: 16,
+            successors: ["b", "c"].map { DSDPlaybackItem(id: $0, url: url, descriptor: descriptor) }
+        ) { item in opened.append(item.id); return nil }
+        #expect(try sequence.read(maximumDoPFrames: 4).count == 2)
+        #expect(try sequence.read(maximumDoPFrames: 4).isEmpty)
+        #expect(try sequence.read(maximumDoPFrames: 4).isEmpty)
+        #expect(opened == ["b"])
+        #expect(sequence.position(consumedFrames: 0).samplePosition == 16)
+        #expect(sequence.position(consumedFrames: 1) == .init(itemID: "a", samplePosition: 32, sampleCount: 32))
+    }
+
     private func makeDSF(
         sampleRate: UInt32,
         channels: UInt32,
