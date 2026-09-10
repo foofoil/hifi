@@ -15,6 +15,7 @@ private struct RuntimeInterfaceV1 {
     let performCommand: RuntimeCall?
     let releaseBytes: ReleaseCall?
     let destroy: DestroyCall?
+    let performApplicationCommand: RuntimeCall?
 }
 
 @_silgen_name("foofoil_extension_create")
@@ -45,7 +46,8 @@ do {
     guard interface.pointee.apiVersion == 1,
           interface.pointee.structSize >= MemoryLayout<RuntimeInterfaceV1>.size,
           let createSession = interface.pointee.createSession,
-          let releaseBytes = interface.pointee.releaseBytes else {
+          let releaseBytes = interface.pointee.releaseBytes,
+          let performApplicationCommand = interface.pointee.performApplicationCommand else {
         throw SmokeError.invalidInterface
     }
     func perform(_ commandID: String, session: [String: Any], fields: [String: Any] = [:]) throws -> [String: Any] {
@@ -93,6 +95,33 @@ do {
           session["audioDeviceSelection"] is [String: Any],
           !isSelfTest || ((session["playbackQueue"] as? [String: Any])?["items"] as? [[String: Any]])?.count == 2 else {
         throw SmokeError.invalidSession
+    }
+    if isSelfTest {
+        let deviceRequest = try JSONSerialization.data(withJSONObject: [
+            "command": "snapshot",
+            "clientID": "00000000-0000-0000-0000-0000000000AA"
+        ])
+        var deviceResponse: UnsafeMutablePointer<UInt8>?
+        var deviceResponseLength = 0
+        let deviceStatus = deviceRequest.withUnsafeBytes { bytes in
+            performApplicationCommand(
+                interface.pointee.context,
+                bytes.bindMemory(to: UInt8.self).baseAddress,
+                bytes.count,
+                &deviceResponse,
+                &deviceResponseLength
+            )
+        }
+        guard deviceStatus == 0, let deviceResponse else { throw SmokeError.callFailed(deviceStatus) }
+        defer { releaseBytes(interface.pointee.context, deviceResponse, deviceResponseLength) }
+        guard let snapshot = try JSONSerialization.jsonObject(
+            with: Data(bytes: deviceResponse, count: deviceResponseLength)
+        ) as? [String: Any],
+              snapshot["contractVersion"] as? Int == 1,
+              snapshot["devices"] is [[String: Any]],
+              snapshot["pcmRouteMode"] is String else {
+            throw SmokeError.invalidSession
+        }
     }
     var finalSession = session
     if isSelfTest {
