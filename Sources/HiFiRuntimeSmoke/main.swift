@@ -122,6 +122,69 @@ do {
               snapshot["pcmRouteMode"] is String else {
             throw SmokeError.invalidSession
         }
+
+        func probe(_ url: URL) throws -> [String: Any] {
+            let payload = try JSONSerialization.data(withJSONObject: [
+                "commandID": "content.probe",
+                "contractVersion": 1,
+                "resource": ["url": url.absoluteString],
+                "maxReadBytes": 2_097_152
+            ])
+            var response: UnsafeMutablePointer<UInt8>?
+            var length = 0
+            let status = payload.withUnsafeBytes { bytes in
+                performApplicationCommand(
+                    interface.pointee.context,
+                    bytes.bindMemory(to: UInt8.self).baseAddress,
+                    bytes.count,
+                    &response,
+                    &length
+                )
+            }
+            guard status == 0, let response else { throw SmokeError.callFailed(status) }
+            defer { releaseBytes(interface.pointee.context, response, length) }
+            return try JSONSerialization.jsonObject(with: Data(bytes: response, count: length)) as! [String: Any]
+        }
+
+        let probeDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("foofoil-hifi-probe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: probeDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: probeDir) }
+        let ordinaryISO = probeDir.appendingPathComponent("disk.iso")
+        try Data(repeating: 0, count: 32).write(to: ordinaryISO)
+        var magicISO = Data(repeating: 0, count: 511 * 2048)
+        magicISO.replaceSubrange((510 * 2048)..<(510 * 2048 + 8), with: Data("SACDMTOC".utf8))
+        let sacdISO = probeDir.appendingPathComponent("album.iso")
+        try magicISO.write(to: sacdISO)
+        let unmatchedDSF = try probe(selfTestURL)
+        let unmatchedISO = try probe(ordinaryISO)
+        let matchedISO = try probe(sacdISO)
+        guard unmatchedDSF["disposition"] as? String == "unmatched",
+              unmatchedISO["disposition"] as? String == "unmatched",
+              matchedISO["disposition"] as? String == "matched" else {
+            throw SmokeError.invalidSession
+        }
+        let tinyBudget = try JSONSerialization.data(withJSONObject: [
+            "commandID": "content.probe",
+            "contractVersion": 1,
+            "resource": ["url": sacdISO.absoluteString],
+            "maxReadBytes": 8
+        ])
+        var tinyResponse: UnsafeMutablePointer<UInt8>?
+        var tinyLength = 0
+        let tinyStatus = tinyBudget.withUnsafeBytes { bytes in
+            performApplicationCommand(
+                interface.pointee.context,
+                bytes.bindMemory(to: UInt8.self).baseAddress,
+                bytes.count,
+                &tinyResponse,
+                &tinyLength
+            )
+        }
+        guard tinyStatus == 0, let tinyResponse else { throw SmokeError.callFailed(tinyStatus) }
+        defer { releaseBytes(interface.pointee.context, tinyResponse, tinyLength) }
+        let tiny = try JSONSerialization.jsonObject(with: Data(bytes: tinyResponse, count: tinyLength)) as! [String: Any]
+        guard tiny["disposition"] as? String == "unmatched" else { throw SmokeError.invalidSession }
     }
     var finalSession = session
     if isSelfTest {

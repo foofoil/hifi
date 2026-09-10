@@ -165,11 +165,17 @@ private let performApplicationCommandCallback: RuntimeCall = { _, input, inputLe
         return RuntimeStatus.invalidMessage
     }
     do {
+        if message["commandID"] as? String == "content.probe" {
+            let response = try contentProbe(message)
+            return writeJSON(response, to: output, length: outputLength)
+        }
         let response = try audioDeviceServiceController.perform(
             message,
             stopDSDPlayback: { try runtimeController.stopForExternalPCM(deviceUID: $0) }
         )
         return writeJSON(response, to: output, length: outputLength)
+    } catch RuntimeControllerError.invalidSession {
+        return RuntimeStatus.invalidMessage
     } catch {
         return RuntimeStatus.processingFailed
     }
@@ -207,6 +213,29 @@ nonisolated(unsafe) private let interfacePointer: UnsafeMutablePointer<RuntimeIn
 public func foofoilExtensionCreate(_ negotiatedAPIVersion: UInt32) -> UnsafeRawPointer? {
     guard negotiatedAPIVersion == 1 else { return nil }
     return UnsafeRawPointer(interfacePointer)
+}
+
+/// 只在预算内读取 Scarlet Book 主 TOC 魔数；不建会话、不碰设备。
+private func contentProbe(_ message: [String: Any]) throws -> [String: Any] {
+    guard message["contractVersion"] as? Int == 1,
+          let resource = message["resource"] as? [String: Any],
+          let urlString = resource["url"] as? String,
+          let fallbackURL = URL(string: urlString), fallbackURL.isFileURL else {
+        throw RuntimeControllerError.invalidSession
+    }
+    let maxReadBytes = (message["maxReadBytes"] as? Int) ?? 2_097_152
+    guard maxReadBytes > 0 else { throw RuntimeControllerError.invalidSession }
+    let sniffBytes = 510 * 2048 + 8
+    var result: [String: Any] = ["contractVersion": 1, "disposition": "unmatched"]
+    guard fallbackURL.pathExtension.lowercased() == "iso", maxReadBytes >= sniffBytes else {
+        return result
+    }
+    let access = RuntimeResourceAccess(resource: resource, fallbackURL: fallbackURL)
+    if SACDISOParser.sniff(fileAt: access.url) {
+        result["disposition"] = "matched"
+        result["reason"] = "sacd-master-toc"
+    }
+    return result
 }
 
 private func jsonObject(_ input: UnsafePointer<UInt8>?, length: Int) -> [String: Any]? {
