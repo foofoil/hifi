@@ -276,14 +276,15 @@ private func makeSession(
     ].compactMap { $0 }.joined(separator: "\n")
     let compatibleDevices = devices.filter { $0.potentialDoPDSDRates.contains(descriptor.sampleRate) }
     let selected = compatibleDevices.first(where: \.isSystemDefault) ?? compatibleDevices.first
-    let deviceObjects: [[String: Any]] = devices.map {
+    let deviceObjects: [[String: Any]] = devices.map { device in
         [
-            "id": $0.id,
-            "displayName": $0.displayName,
-            "isSystemDefault": $0.isSystemDefault,
-            "isConnected": $0.isConnected,
-            "hasHardwareVolume": $0.hasHardwareVolume,
-            "supportedDoPRates": $0.potentialDoPDSDRates
+            "id": device.id,
+            "displayName": device.displayName,
+            "isSystemDefault": device.isSystemDefault,
+            "isConnected": device.isConnected,
+            "isCompatible": compatibleDevices.contains { $0.id == device.id },
+            "hasHardwareVolume": device.hasHardwareVolume,
+            "supportedDoPRates": device.potentialDoPDSDRates
         ]
     }
     // 标准媒体/设备操作由宿主 UI 与公共能力承接；这里只提供 availableActions，不再贡献旧菜单命令。
@@ -688,17 +689,18 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         guard let freshDevices = try? CoreAudioDeviceCatalog.outputDevices() else { return }
         guard var selection = session["audioDeviceSelection"] as? [String: Any] else { return }
         let sampleRate = record.sampleRate
-        let deviceObjects: [[String: Any]] = freshDevices.map {
+        let compatible = freshDevices.filter { $0.isConnected && $0.potentialDoPDSDRates.contains(sampleRate) }
+        let deviceObjects: [[String: Any]] = freshDevices.map { device in
             [
-                "id": $0.id,
-                "displayName": $0.displayName,
-                "isSystemDefault": $0.isSystemDefault,
-                "isConnected": $0.isConnected,
-                "hasHardwareVolume": $0.hasHardwareVolume,
-                "supportedDoPRates": $0.potentialDoPDSDRates
+                "id": device.id,
+                "displayName": device.displayName,
+                "isSystemDefault": device.isSystemDefault,
+                "isConnected": device.isConnected,
+                "isCompatible": compatible.contains { $0.id == device.id },
+                "hasHardwareVolume": device.hasHardwareVolume,
+                "supportedDoPRates": device.potentialDoPDSDRates
             ]
         }
-        let compatible = freshDevices.filter { $0.isConnected && $0.potentialDoPDSDRates.contains(sampleRate) }
         let currentID = record.selectedDeviceID
         let currentStillUsable = currentID.flatMap { id in
             freshDevices.first(where: { $0.id == id })
