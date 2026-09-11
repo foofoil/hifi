@@ -41,4 +41,23 @@ struct MediaActionMessageTests {
             #expect(throws: ActionMessageError.self) { try message.validate() }
         }
     }
+
+    /// 公共媒体消息直接映射为类型化动作，不再经过旧 `hifi.*` 字符串。
+    @Test func mediaMapsToTypedRuntimeActions() throws {
+        func runtimeAction(_ action: [String: Any]) throws -> RuntimeAction {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "commandID": "media.transport", "contractVersion": 1, "action": action
+            ])
+            let message = try JSONDecoder().decode(MediaPlaybackMessage.self, from: data)
+            try message.validate()
+            return message.runtimeAction
+        }
+        #expect(try runtimeAction(["kind": "play"]) == .play)
+        #expect(try runtimeAction(["kind": "pause"]) == .pause)
+        #expect(try runtimeAction(["kind": "previous"]) == .previous)
+        #expect(try runtimeAction(["kind": "next"]) == .next)
+        #expect(try runtimeAction(["kind": "refresh"]) == .refresh)
+        #expect(try runtimeAction(["kind": "seek", "position": 1.5]) == .seek(position: 1.5))
+        #expect(try runtimeAction(["kind": "selectDevice", "deviceID": "opaque-uid"]) == .selectDevice("opaque-uid"))
+    }
 }

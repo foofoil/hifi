@@ -188,22 +188,19 @@ do {
     }
     var finalSession = session
     if isSelfTest {
-        var requested = session
-        var contributions = requested["navigatorContributions"] as! [[String: Any]]
-        contributions[0]["selectedItemIDs"] = ["file:1"]
-        requested["navigatorContributions"] = contributions
-        finalSession = try perform("hifi.navigator.activate", session: requested)
+        finalSession = try perform("ui.navigator.action", session: session, fields: [
+            "contractVersion": 1,
+            "action": ["contributionID": "hifi.playback-queue", "kind": "activate", "itemIDs": ["file:1"]]
+        ])
         guard (finalSession["playbackQueue"] as? [String: Any])?["currentItemID"] as? String == "file:1" else {
             throw SmokeError.invalidSession
         }
 
-        requested = finalSession
-        contributions = requested["navigatorContributions"] as! [[String: Any]]
-        var items = contributions[0]["items"] as! [[String: Any]]
-        items.swapAt(0, 1)
-        contributions[0]["items"] = items
-        requested["navigatorContributions"] = contributions
-        finalSession = try perform("hifi.navigator.move", session: requested)
+        finalSession = try perform("ui.navigator.action", session: finalSession, fields: [
+            "contractVersion": 1,
+            "action": ["contributionID": "hifi.playback-queue", "kind": "move",
+                       "itemIDs": ["file:0"], "movePosition": "end"]
+        ])
         let reorderedIDs = ((finalSession["playbackQueue"] as? [String: Any])?["items"] as? [[String: Any]])?
             .compactMap { $0["id"] as? String }
         guard reorderedIDs == ["file:1", "file:0"],
@@ -214,12 +211,15 @@ do {
         }
     }
     if isSelfTest {
-        var playback = finalSession["mediaPlayback"] as! [String: Any]
-        playback["position"] = 1.0
-        finalSession["mediaPlayback"] = playback
-        finalSession = try perform("hifi.seek", session: finalSession)
-        finalSession = try perform("hifi.pause", session: finalSession)
-        finalSession = try perform("hifi.pause", session: finalSession)
+        finalSession = try perform("media.transport", session: finalSession, fields: [
+            "contractVersion": 1, "action": ["kind": "seek", "position": 1.0]
+        ])
+        finalSession = try perform("media.transport", session: finalSession, fields: [
+            "contractVersion": 1, "action": ["kind": "pause"]
+        ])
+        finalSession = try perform("media.transport", session: finalSession, fields: [
+            "contractVersion": 1, "action": ["kind": "pause"]
+        ])
         guard let restored = finalSession["mediaPlayback"] as? [String: Any],
               restored["state"] as? String == "paused",
               let position = restored["position"] as? Double, abs(position - 1) < 0.00001 else {
@@ -270,6 +270,13 @@ do {
                 throw SmokeError.invalidSession
             } catch SmokeError.callFailed(3) {}
         }
+        // 旧外部私有入口明确被拒绝，不再被 Runtime 接受。
+        for legacyCommandID in ["hifi.play", "hifi.pause", "hifi.status", "hifi.next", "hifi.close", "hifi.device.test-dac-uid"] {
+            do {
+                _ = try perform(legacyCommandID, session: finalSession)
+                throw SmokeError.invalidSession
+            } catch SmokeError.callFailed(1) {}
+        }
     }
     if isSelfTest, CommandLine.arguments.count >= 3 {
         let fixtureURL = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -281,8 +288,10 @@ do {
                   ($0["declaration"] as? [String: Any])?["id"] as? String == "session.lifecycle"
               }) == true else { throw SmokeError.invalidSession }
 
-        // 先用旧协议切到另一曲，再用共享 fixture 经真实 ABI 恢复，验证新旧入口共存。
-        finalSession = try perform("hifi.next", session: finalSession)
+        // 先用公共媒体命令切到另一曲，再用共享 fixture 经真实 ABI 恢复，验证公共入口。
+        finalSession = try perform("media.transport", session: finalSession, fields: [
+            "contractVersion": 1, "action": ["kind": "next"]
+        ])
         finalSession = try perform("session.lifecycle", session: finalSession, fields: fixtures[0])
         guard (finalSession["playbackQueue"] as? [String: Any])?["currentItemID"] as? String == "file:1",
               let restored = finalSession["mediaPlayback"] as? [String: Any],
@@ -337,7 +346,9 @@ do {
             throw SmokeError.invalidSession
         }
         do {
-            _ = try perform("hifi.status", session: finalSession)
+            _ = try perform("media.transport", session: finalSession, fields: [
+                "contractVersion": 1, "action": ["kind": "refresh"]
+            ])
             throw SmokeError.invalidSession
         } catch SmokeError.callFailed(3) {
             // 关闭确实移除了运行时记录；重复 close 的成功不是重复使用旧会话。
