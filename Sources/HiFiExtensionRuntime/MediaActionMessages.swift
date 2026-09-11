@@ -1,5 +1,18 @@
 import Foundation
 
+/// Runtime 内部的类型化媒体动作；公共消息解码后直接映射到这里，不再绕回旧 `hifi.*` 字符串。
+enum RuntimeAction: Equatable {
+    case play
+    case pause
+    case seek(position: Double)
+    case previous
+    case next
+    case refresh
+    case selectDevice(String)
+    case activate(itemID: String)
+    case move(orderedIDs: [String])
+}
+
 struct MediaPlaybackMessage: Decodable {
     struct Action: Decodable {
         enum Kind: String, Decodable { case play, pause, previous, next, refresh, seek, selectDevice }
@@ -21,15 +34,15 @@ struct MediaPlaybackMessage: Decodable {
         }
     }
 
-    var runtimeCommand: String {
+    var runtimeAction: RuntimeAction {
         switch action.kind {
-        case .play: "hifi.play"
-        case .pause: "hifi.pause"
-        case .previous: "hifi.previous"
-        case .next: "hifi.next"
-        case .refresh: "hifi.status"
-        case .seek: "hifi.seek"
-        case .selectDevice: "hifi.device.\(action.deviceID ?? "")"
+        case .play: .play
+        case .pause: .pause
+        case .previous: .previous
+        case .next: .next
+        case .refresh: .refresh
+        case .seek: .seek(position: action.position ?? 0)
+        case .selectDevice: .selectDevice(action.deviceID ?? "")
         }
     }
 }

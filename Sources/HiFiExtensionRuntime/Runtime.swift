@@ -141,16 +141,12 @@ private let performCommandCallback: RuntimeCall = { _, input, inputLength, outpu
         if let lifecycle {
             try runtimeController.perform(lifecycle: lifecycle, session: &session)
         } else if let media {
-            if media.action.kind == .seek {
-                var playback = session["mediaPlayback"] as? [String: Any] ?? [:]
-                playback["position"] = media.action.position
-                session["mediaPlayback"] = playback
-            }
-            try runtimeController.perform(commandID: media.runtimeCommand, session: &session)
+            try runtimeController.perform(media: media, session: &session)
         } else if let navigation {
             try runtimeController.perform(navigation: navigation, session: &session)
         } else {
-            try runtimeController.perform(commandID: commandID, session: &session)
+            // 只接受当前公共命令；旧 `hifi.*` 外部入口明确拒绝。
+            return RuntimeStatus.invalidMessage
         }
     } catch {
         return RuntimeStatus.processingFailed
@@ -290,59 +286,11 @@ private func makeSession(
             "supportedDoPRates": $0.potentialDoPDSDRates
         ]
     }
-    var commands: [[String: Any]] = [
-        [
-            "id": "hifi.play",
-            "titleLocalizationKey": "Play",
-            "symbolName": "play.fill",
-            "modifierFlags": 0,
-            "isEnabled": selected != nil,
-            "isChecked": false
-        ],
-        [
-            "id": "hifi.pause",
-            "titleLocalizationKey": "Pause",
-            "symbolName": "pause.fill",
-            "modifierFlags": 0,
-            "isEnabled": false,
-            "isChecked": false
-        ],
-        [
-            "id": "hifi.previous",
-            "titleLocalizationKey": "Previous",
-            "symbolName": "backward.fill",
-            "modifierFlags": 0,
-            "isEnabled": sources.count > 1,
-            "isChecked": false
-        ],
-        [
-            "id": "hifi.next",
-            "titleLocalizationKey": "Next",
-            "symbolName": "forward.fill",
-            "modifierFlags": 0,
-            "isEnabled": sources.count > 1,
-            "isChecked": false
-        ],
-        [
-        "id": "hifi.output-device",
-        "titleLocalizationKey": "Hi-Fi Output Device",
-        "symbolName": "hifispeaker.2",
-        "modifierFlags": 0,
-        "isEnabled": !devices.isEmpty,
-        "isChecked": false
-        ]
-    ]
-    commands.append(contentsOf: devices.map {
-        [
-            "id": "hifi.device.\($0.id)",
-            "titleLocalizationKey": "",
-            "displayTitle": $0.displayName,
-            "parentID": "hifi.output-device",
-            "modifierFlags": 0,
-            "isEnabled": $0.isConnected && $0.potentialDoPDSDRates.contains(descriptor.sampleRate),
-            "isChecked": $0.id == selected?.id
-        ]
-    })
+    // 标准媒体/设备操作由宿主 UI 与公共能力承接；这里只提供 availableActions，不再贡献旧菜单命令。
+    var availableActions = ["refresh", "seek"]
+    if devices.contains(where: { $0.isConnected }) { availableActions.append("selectDevice") }
+    if selected != nil { availableActions.append("play") }
+    if sources.count > 1 { availableActions.append(contentsOf: ["previous", "next"]) }
     let capability: (String, String) -> [String: Any] = { id, scope in
         ["declaration": ["id": id, "contractVersion": 1, "scope": scope, "dependencies": []], "state": "active"]
     }
@@ -350,7 +298,8 @@ private func makeSession(
         "state": "idle",
         "position": 0,
         "isSeekable": duration != nil,
-        "underrunCount": 0
+        "underrunCount": 0,
+        "availableActions": availableActions
     ]
     if let duration { playback["duration"] = duration }
     var selection: [String: Any] = [
@@ -367,8 +316,7 @@ private func makeSession(
         capability("media.transport", "session"),
         capability("session.lifecycle", "session"),
         capability("session.seekable", "session"),
-        capability("audio.device-selection", "application"),
-        capability("ui.commands", "presentation")
+        capability("audio.device-selection", "application")
     ]
     if sources.count > 1 {
         capabilities.append(capability("ui.navigator-actions", "presentation"))
@@ -382,7 +330,7 @@ private func makeSession(
         "request": request,
         "presentation": ["kind": "text", "titleKey": "Hi-Fi Audio", "body": details],
         "capabilities": capabilities,
-        "commands": commands,
+        "commands": [],
         "navigatorContributions": [],
         "mediaPlayback": playback,
         "audioDeviceSelection": selection
@@ -509,15 +457,12 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             // 文件被替换或曲目消失时，不把旧曲目的进度套到其他曲目。
             return
         }
-        try perform(commandID: "hifi.pause", session: &session)
+        try perform(action: .pause, session: &session)
         if let itemID = restoration.currentItemID {
             switchItem(to: itemID, record: record, allowsAutomaticPlayback: false)
         }
         if let position = restoration.position {
-            var playback = session["mediaPlayback"] as? [String: Any] ?? [:]
-            playback["position"] = position
-            session["mediaPlayback"] = playback
-            try perform(commandID: "hifi.seek", session: &session)
+            try perform(action: .seek(position: position), session: &session)
         }
         updatePlaybackState(for: record, session: &session)
         updateQueueState(for: record, session: &session)
@@ -535,20 +480,29 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             in: record.sources.map(\.id), canMove: !record.sources.contains { $0.sacdTrackNumber != nil }
         )
         var contribution = navigatorObject(sources: record.sources, currentID: record.sources[record.currentIndex].id)
-        let command: String
-        if navigation.action.kind == .activate {
+        switch navigation.action.kind {
+        case .activate:
             contribution["selectedItemIDs"] = navigation.action.itemIDs
-            command = "hifi.navigator.activate"
-        } else {
-            guard let items = contribution["items"] as? [[String: Any]] else { throw RuntimeControllerError.invalidQueueOrder }
+            session["navigatorContributions"] = [contribution]
+            try perform(action: .activate(itemID: navigation.action.itemIDs[0]), session: &session)
+        case .move:
+            guard let items = contribution["items"] as? [[String: Any]] else {
+                throw RuntimeControllerError.invalidQueueOrder
+            }
             contribution["items"] = orderedIDs.compactMap { id in items.first { $0["id"] as? String == id } }
-            command = "hifi.navigator.move"
+            session["navigatorContributions"] = [contribution]
+            try perform(action: .move(orderedIDs: orderedIDs), session: &session)
+        case .remove:
+            throw ActionMessageError.invalidAction
         }
-        session["navigatorContributions"] = [contribution]
-        try perform(commandID: command, session: &session)
     }
 
-    func perform(commandID: String, session: inout [String: Any]) throws {
+    /// 公共媒体消息直接映射为类型化动作，不再经过旧 `hifi.*` 字符串 dispatch。
+    func perform(media: MediaPlaybackMessage, session: inout [String: Any]) throws {
+        try perform(action: media.runtimeAction, session: &session)
+    }
+
+    func perform(action: RuntimeAction, session: inout [String: Any]) throws {
         guard let idString = session["id"] as? String,
               let id = UUID(uuidString: idString) else {
             throw RuntimeControllerError.invalidSession
@@ -567,7 +521,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             let ids = items.compactMap { $0["id"] as? String }
             let oldSuccessors = record.successors.map(\.id)
             record.sequenceIDs = ids
-            if commandID == "hifi.status", record.isActive, oldSuccessors != record.successors.map(\.id) {
+            if case .refresh = action, record.isActive, oldSuccessors != record.successors.map(\.id) {
                 let status = try record.player.stop()
                 synchronizeItem(for: record, status: status)
                 record.samplePosition = status.samplePosition
@@ -589,8 +543,8 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         // 每次命令前用系统最新设备列表刷新会话，避免独占设备离线后菜单与状态卡在已不存在的设备上。
         refreshDeviceSelection(for: record, session: &session)
 
-        switch commandID {
-        case "hifi.play":
+        switch action {
+        case .play:
             do {
                 audioDeviceServiceController.releasePCMForDSD(deviceUID: record.selectedDeviceID)
                 guard let deviceUID = record.selectedDeviceID else {
@@ -621,7 +575,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 record.playbackState = "failed"
                 record.failureDescription = failureKey(error)
             }
-        case "hifi.pause":
+        case .pause:
             lock.lock()
             let ownsPlayer = record.isActive
             lock.unlock()
@@ -637,10 +591,8 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 lock.unlock()
             }
             record.playbackState = "paused"
-        case "hifi.seek":
-            guard let playback = session["mediaPlayback"] as? [String: Any],
-                  let requestedPosition = (playback["position"] as? NSNumber)?.doubleValue,
-                  requestedPosition.isFinite, requestedPosition >= 0 else {
+        case .seek(let requestedPosition):
+            guard requestedPosition.isFinite, requestedPosition >= 0 else {
                 throw RuntimeControllerError.invalidPlaybackPosition
             }
             let requestedSample = min(
@@ -680,33 +632,24 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             } else if record.playbackState == "idle" || record.playbackState == "stopped" {
                 record.playbackState = "paused"
             }
-        case "hifi.previous", "hifi.next", "hifi.navigator.activate":
-            let targetID: String?
-            if commandID == "hifi.navigator.activate" {
-                let contribution = (session["navigatorContributions"] as? [[String: Any]])?.first
-                targetID = (contribution?["selectedItemIDs"] as? [String])?.first
-            } else {
-                let delta = commandID == "hifi.next" ? 1 : -1
-                let next = record.currentIndex + delta
-                targetID = record.sources.indices.contains(next) ? record.sources[next].id : nil
+        case .previous:
+            let previous = record.currentIndex - 1
+            if record.sources.indices.contains(previous) {
+                switchItem(to: record.sources[previous].id, record: record)
             }
-            if let targetID { switchItem(to: targetID, record: record) }
-        case "hifi.navigator.move":
-            guard let contribution = (session["navigatorContributions"] as? [[String: Any]])?.first,
-                  let items = contribution["items"] as? [[String: Any]] else {
-                throw RuntimeControllerError.invalidQueueOrder
+        case .next:
+            let next = record.currentIndex + 1
+            if record.sources.indices.contains(next) {
+                switchItem(to: record.sources[next].id, record: record)
             }
-            try reorderSources(
-                using: items.compactMap { $0["id"] as? String },
-                record: record
-            )
-        case "hifi.close":
-            try close(record)
-        default:
-            if commandID.hasPrefix("hifi.device.") {
-                let selectedID = String(commandID.dropFirst("hifi.device.".count))
-                try selectDevice(selectedID, for: record, session: &session)
-            }
+        case .activate(let itemID):
+            switchItem(to: itemID, record: record)
+        case .move(let orderedIDs):
+            try reorderSources(using: orderedIDs, record: record)
+        case .refresh:
+            break
+        case .selectDevice(let selectedID):
+            try selectDevice(selectedID, for: record, session: &session)
         }
         updatePlaybackState(for: record, session: &session)
         updateQueueState(for: record, session: &session)
@@ -743,8 +686,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
     /// 若没有任何可支持当前 DSD 速率的设备则置为失败，宿主据此给出警告且无法播放。
     private func refreshDeviceSelection(for record: RuntimeSession, session: inout [String: Any]) {
         guard let freshDevices = try? CoreAudioDeviceCatalog.outputDevices() else { return }
-        guard var selection = session["audioDeviceSelection"] as? [String: Any],
-              let commands = session["commands"] as? [[String: Any]] else { return }
+        guard var selection = session["audioDeviceSelection"] as? [String: Any] else { return }
         let sampleRate = record.sampleRate
         let deviceObjects: [[String: Any]] = freshDevices.map {
             [
@@ -802,27 +744,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             selection.removeValue(forKey: "statusDescription")
         }
         selection["revision"] = ((selection["revision"] as? NSNumber)?.uint64Value ?? 0) + 1
-        // 保留非设备命令，重建设备子命令以反映插拔后的最新列表。
-        let kept = commands.filter { ($0["id"] as? String)?.hasPrefix("hifi.device.") != true }
-        var rebuilt = kept
-        for device in freshDevices {
-            rebuilt.append([
-                "id": "hifi.device.\(device.id)",
-                "titleLocalizationKey": "",
-                "displayTitle": device.displayName,
-                "parentID": "hifi.output-device",
-                "modifierFlags": 0,
-                "isEnabled": device.isConnected && device.potentialDoPDSDRates.contains(sampleRate),
-                "isChecked": device.id == record.selectedDeviceID
-            ])
-        }
-        if let outputIndex = rebuilt.firstIndex(where: { ($0["id"] as? String) == "hifi.output-device" }) {
-            var output = rebuilt[outputIndex]
-            output["isEnabled"] = !freshDevices.isEmpty
-            rebuilt[outputIndex] = output
-        }
         session["audioDeviceSelection"] = selection
-        session["commands"] = rebuilt
     }
 
     private func selectDevice(
@@ -830,8 +752,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         for record: RuntimeSession,
         session: inout [String: Any]
     ) throws {
-        guard var selection = session["audioDeviceSelection"] as? [String: Any],
-              var commands = session["commands"] as? [[String: Any]] else {
+        guard var selection = session["audioDeviceSelection"] as? [String: Any] else {
             throw RuntimeControllerError.invalidSession
         }
         let devices = selection["devices"] as? [[String: Any]] ?? []
@@ -861,9 +782,6 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         selection["selectedDeviceID"] = selectedID
         selection["statusDescription"] = device["displayName"] as? String ?? selectedID
         selection["revision"] = ((selection["revision"] as? NSNumber)?.uint64Value ?? 0) + 1
-        for index in commands.indices where (commands[index]["id"] as? String)?.hasPrefix("hifi.device.") == true {
-            commands[index]["isChecked"] = commands[index]["id"] as? String == "hifi.device.\(selectedID)"
-        }
         if wasPlaying {
             do {
                 audioDeviceServiceController.releasePCMForDSD(deviceUID: selectedID)
@@ -887,7 +805,6 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             }
         }
         session["audioDeviceSelection"] = selection
-        session["commands"] = commands
     }
 
     /// 只交接同一设备，其他 DAC 上的会话可继续播放。
@@ -1063,6 +980,14 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             }
         }
         let position = TimeInterval(record.samplePosition) / TimeInterval(record.sampleRate)
+        // 权威可用性只由公共快照表达；宿主不再读取旧 command 的 isEnabled。
+        let devices = (session["audioDeviceSelection"] as? [String: Any])?["devices"] as? [[String: Any]] ?? []
+        var availableActions = ["refresh", "seek"]
+        if devices.contains(where: { ($0["isConnected"] as? Bool) != false }) {
+            availableActions.append("selectDevice")
+        }
+        availableActions.append(isPlaying ? "pause" : "play")
+        if record.sources.count > 1 { availableActions.append(contentsOf: ["previous", "next"]) }
         if var playback = session["mediaPlayback"] as? [String: Any] {
             playback["state"] = record.playbackState
             playback["position"] = position
@@ -1070,6 +995,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             playback["isSeekable"] = true
             playback["underrunCount"] = record.underrunCount
             playback["failureMessage"] = record.failureDescription
+            playback["availableActions"] = availableActions
             session["mediaPlayback"] = playback
         }
         if var selection = session["audioDeviceSelection"] as? [String: Any] {
@@ -1087,16 +1013,6 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 selection["statusDescription"] = reconnectedDevice.displayName
             }
             session["audioDeviceSelection"] = selection
-        }
-        if var commands = session["commands"] as? [[String: Any]] {
-            for index in commands.indices {
-                switch commands[index]["id"] as? String {
-                case "hifi.play": commands[index]["isEnabled"] = !isPlaying
-                case "hifi.pause": commands[index]["isEnabled"] = isPlaying
-                default: break
-                }
-            }
-            session["commands"] = commands
         }
     }
 }
