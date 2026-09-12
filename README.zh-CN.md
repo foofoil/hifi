@@ -4,7 +4,7 @@
 
 Hi-Fi 是 foofoil 的第一方扩展，不能作为独立播放器运行。请先安装 foofoil，再在应用内安装 Hi-Fi（或在从源码构建时加载开发用扩展包）。
 
-它为轻量 Core 补充高解析度与 DSD 播放：DSF/DFF、未压缩立体声 SACD ISO、SACD DST（进行中）、增强系统已能播放的格式、输出设备选择、DoP，以及音乐场景下的会话能力。播放列表由 foofoil 的通用导航面板呈现，扩展不提供私有侧栏。
+它为轻量 Core 补充高解析度与 DSD 播放：DSF/DFF、未压缩立体声 SACD ISO、APE + CUE（Monkey's Audio 在扩展内解码为独占 PCM）、SACD DST（进行中）、增强系统已能播放的格式、输出设备选择、DoP，以及音乐场景下的会话能力。播放列表由 foofoil 的通用导航面板呈现，扩展不提供私有侧栏。
 
 [English](README.md)
 
@@ -15,6 +15,7 @@ Hi-Fi 是 foofoil 的第一方扩展，不能作为独立播放器运行。请�
 - DSF / raw DFF / 未压缩立体声 SACD ISO → DoP → CoreAudio HAL → USB DAC
 - Stereo DSD64 DSF 与立体声 DFF 已在 SMSL DAC 上验收；5.0 DFF 按设备能力输出环绕或折成立体声
 - 未压缩立体声 SACD ISO 经 `SACDMTOC` sniff 后，以 CUE 式宿主列表呈现（曲名 + 序号），从 Stereo Area 的 3-in-14/3-in-16 直接出流，不写临时 DSF；列表、Seek 与出声已在 SMSL 上确认
+- APE（Monkey's Audio，BSD-3 解码器内嵌于 `Sources/MACLib`）在扩展内解码，经 CoreAudio HAL 以 Hog 独占输出比特精确 PCM；单个 `.ape` 按整轨打开，同名/打开的 `.cue` 投影 CUE 分轨列表并支持 Seek 与切轨。DAC 实听待用户确认
 - 宿主侧具备播放、暂停、进度轮询、输出设备选择和关闭时释放设备的能力
 
 这还不是正式发布。DSD 仅通过 DoP 输出，不实现 DSD → PCM 转换。DSD64/128/256 及历史曲目、播放位置恢复已通过实测。多个箔按设备交接独占 PCM/DSD 的修复已实现，待实机回归；跟随系统输出不参与抢占。记住上次选择的 DAC 尚未完成。其他已测设备场景未发现问题。已有资源的 metadata 未发现问题，不列补充事项。DST / SACD 多声道、进程隔离评估及可供应用内安装的签名与公证 Release 属后续范围。

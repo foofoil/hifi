@@ -23,7 +23,7 @@ private func createRuntime(_ version: UInt32) -> UnsafeRawPointer?
 
 guard CommandLine.arguments.count == 2
     || ((3...4).contains(CommandLine.arguments.count) && CommandLine.arguments[1] == "--self-test") else {
-    FileHandle.standardError.write(Data("Usage: hifi-runtime-smoke <file.dsf|file.dff|--self-test> [lifecycle-fixture.json] [media-navigation-fixture.json]\n".utf8))
+    FileHandle.standardError.write(Data("Usage: hifi-runtime-smoke <file.dsf|file.dff|file.ape|file.cue|--self-test> [lifecycle-fixture.json] [media-navigation-fixture.json]\n".utf8))
     exit(64)
 }
 

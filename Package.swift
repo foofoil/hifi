@@ -13,12 +13,25 @@ let package = Package(
         .executable(name: "hifi-hal-probe", targets: ["HiFiHALProbe"])
     ],
     targets: [
-        .target(name: "HiFiExtensionCore"),
+        .target(
+            name: "MACLib",
+            path: "Sources/MACLib",
+            publicHeadersPath: "include",
+            cxxSettings: [
+                .headerSearchPath("ThirdParty/MAC/Source/Shared"),
+                .headerSearchPath("ThirdParty/MAC/Source/MACLib"),
+            ]
+        ),
+        .target(name: "HiFiExtensionCore", dependencies: ["MACLib"]),
         .target(name: "HiFiExtensionRuntime", dependencies: ["HiFiExtensionCore"]),
         .executableTarget(name: "HiFiInspect", dependencies: ["HiFiExtensionCore"]),
         .executableTarget(name: "HiFiRuntimeSmoke", dependencies: ["HiFiExtensionRuntime"]),
         .executableTarget(name: "HiFiHALProbe", dependencies: ["HiFiExtensionCore"]),
-        .testTarget(name: "HiFiExtensionCoreTests", dependencies: ["HiFiExtensionCore"]),
+        .testTarget(
+            name: "HiFiExtensionCoreTests",
+            dependencies: ["HiFiExtensionCore"],
+            resources: [.copy("Fixtures")]
+        ),
         .testTarget(name: "HiFiExtensionRuntimeTests", dependencies: ["HiFiExtensionRuntime"])
     ]
 )

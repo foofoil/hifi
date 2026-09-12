@@ -19,7 +19,9 @@
       "contentFamily": "audio",
       "contentTypes": [
         {"extensions": ["dsf", "dff"], "strategy": "extension"},
-        {"extensions": ["iso"], "strategy": "sniff"}
+        {"extensions": ["ape"], "strategy": "extension"},
+        {"extensions": ["iso"], "strategy": "sniff"},
+        {"extensions": ["cue"], "strategy": "sniff"}
       ]
     }
   ],

@@ -90,6 +90,26 @@ private func prepareSources(request: [String: Any]) throws -> [RuntimeSource] {
                 )
             }
         }
+        switch access.url.pathExtension.lowercased() {
+        case "ape":
+            // 同集合里已有同名 CUE 时以 CUE 分轨为准，避免同一专辑展开两次。
+            if resources.count > 1,
+               collectionContainsCue(matching: access.url, resources: resources, skipping: index) {
+                return []
+            }
+            return try apeSources(
+                audioAccess: access,
+                index: index
+            )
+        case "cue":
+            return try cueSources(
+                cueAccess: access,
+                resources: resources,
+                index: index
+            )
+        default:
+            break
+        }
         let descriptor = try DSDContainerParser.parse(fileAt: access.url)
         guard descriptor.compression == .rawDSD,
               descriptor.sampleCount != nil,
@@ -98,6 +118,152 @@ private func prepareSources(request: [String: Any]) throws -> [RuntimeSource] {
         }
         return [RuntimeSource(id: "file:\(index)", access: access, descriptor: descriptor)]
     }
+}
+
+/// 单 APE 文件：同目录同名 CUE 可读且指向本文件时展开为分轨，否则按整轨建会话。
+private func apeSources(
+    audioAccess: RuntimeResourceAccess,
+    index: Int
+) throws -> [RuntimeSource] {
+    let descriptor = try APEParser.parse(fileAt: audioAccess.url)
+    guard HALPCMPlaybackEngine.supportsPlayback(descriptor) else {
+        throw RuntimeControllerError.invalidSource
+    }
+    if let sheet = try apeCueSheet(stemmingFrom: audioAccess.url, descriptor: descriptor),
+       sheet.tracks.count > 1 {
+        return cueTrackSources(sheet: sheet, audioAccess: audioAccess, descriptor: descriptor)
+    }
+    return [RuntimeSource(id: "file:\(index)", access: audioAccess, apeDescriptor: descriptor)]
+}
+
+/// CUE 文件：只接管单 APE 文件的整轨 CUE，其他交还宿主或其他 provider。
+private func cueSources(
+    cueAccess: RuntimeResourceAccess,
+    resources: [[String: Any]],
+    index: Int
+) throws -> [RuntimeSource] {
+    let cueURL = cueAccess.url
+    guard let fileName = try cueFirstAudioFileName(cueURL: cueURL),
+          (fileName as NSString).pathExtension.lowercased() == "ape" else {
+        throw RuntimeControllerError.invalidSource
+    }
+    let audioAccess = try apeAudioAccess(
+        fileName: fileName,
+        cueURL: cueURL,
+        resources: resources
+    )
+    let descriptor = try APEParser.parse(fileAt: audioAccess.url)
+    guard HALPCMPlaybackEngine.supportsPlayback(descriptor) else {
+        throw RuntimeControllerError.invalidSource
+    }
+    guard let sheet = try APECueSheetParser.load(cueAt: cueURL, sampleRate: descriptor.sampleRate),
+          sheet.tracks.count > 1 else {
+        throw RuntimeControllerError.invalidSource
+    }
+    return cueTrackSources(sheet: sheet, audioAccess: audioAccess, descriptor: descriptor)
+}
+
+/// 轻量读 CUE 首个 FILE 名；读不到按非我方处理，让出给其他 provider。
+private func cueFirstAudioFileName(cueURL: URL) throws -> String? {
+    guard let data = try? Data(contentsOf: cueURL), !data.isEmpty else {
+        throw APECueSheetError.unreadable
+    }
+    guard let text = APECueSheetParser.decodeText(data) else {
+        throw APECueSheetError.unreadable
+    }
+    for rawLine in text.split(whereSeparator: \.isNewline) {
+        let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty,
+              let parsed = APECueSheetParser.parseLine(line),
+              parsed.command == "FILE",
+              let name = parsed.arguments.first, !name.isEmpty else { continue }
+        return name
+    }
+    return nil
+}
+
+/// 用已知的 APE 描述解析同名 CUE；只展开指向本文件的单 APE 整轨 CUE。
+private func apeCueSheet(
+    stemmingFrom url: URL,
+    descriptor: APEAudioDescriptor
+) throws -> APECueSheet? {
+    let directory = url.deletingLastPathComponent()
+    let stem = (url.deletingPathExtension().lastPathComponent as NSString).lowercased
+    let cueURL = directory.appendingPathComponent("\(url.deletingPathExtension().lastPathComponent).cue")
+    guard FileManager.default.fileExists(atPath: cueURL.path) else { return nil }
+    guard let sheet = try? APECueSheetParser.load(cueAt: cueURL, sampleRate: descriptor.sampleRate),
+          sheet.tracks.count > 1 else { return nil }
+    // CUE 必须指向当前 APE（按主名比对，容忍 FILE 里写 .wav 的老抓轨）。
+    let cueStem = ((sheet.audioFileName as NSString).deletingPathExtension as NSString).lowercased
+    guard cueStem == stem else { return nil }
+    return sheet
+}
+
+/// CUE 引用的 APE 访问：优先用 fileCollection 里同名资源的书签（沙盒持久授权），否则用同目录兄弟文件。
+private func apeAudioAccess(
+    fileName: String,
+    cueURL: URL,
+    resources: [[String: Any]]
+) throws -> RuntimeResourceAccess {
+    let baseName = (fileName as NSString).lastPathComponent
+    let wanted = baseName.lowercased()
+    let wantedStem = ((baseName as NSString).deletingPathExtension as NSString).lowercased
+    var stemFallback: RuntimeResourceAccess?
+    for resource in resources {
+        guard let urlString = resource["url"] as? String,
+              let url = URL(string: urlString), url.isFileURL,
+              url.pathExtension.lowercased() == "ape" else { continue }
+        let candidate = url.lastPathComponent.lowercased()
+        let candidateStem = ((url.deletingPathExtension().lastPathComponent as NSString).lowercased)
+        if candidate == wanted || candidateStem == wantedStem {
+            return RuntimeResourceAccess(resource: resource, fallbackURL: url)
+        }
+        if stemFallback == nil,
+           ((cueURL.deletingPathExtension().lastPathComponent as NSString).lowercased) == candidateStem {
+            stemFallback = RuntimeResourceAccess(resource: resource, fallbackURL: url)
+        }
+    }
+    if let stemFallback { return stemFallback }
+    guard let sibling = APECueSheetParser.resolveAudioURL(named: fileName, cueURL: cueURL) else {
+        throw HiFiPlaybackError.resourceAuthorizationFailure
+    }
+    return RuntimeResourceAccess(resource: nil, fallbackURL: sibling)
+}
+
+private func cueTrackSources(
+    sheet: APECueSheet,
+    audioAccess: RuntimeResourceAccess,
+    descriptor: APEAudioDescriptor
+) -> [RuntimeSource] {
+    sheet.tracks.map { track in
+        let endBlock = track.endBlock.map { min($0, descriptor.totalBlocks) }
+        return RuntimeSource(
+            id: "track:cue:\(String(format: "%02d", track.number))",
+            access: audioAccess,
+            apeDescriptor: descriptor,
+            apeStartBlock: min(track.startBlock, descriptor.totalBlocks),
+            apeEndBlock: endBlock,
+            title: track.title,
+            artist: track.performer,
+            album: sheet.displayTitle,
+            cueTrackNumber: track.number
+        )
+    }
+}
+
+/// 同 fileCollection 里是否存在同主名的 CUE 资源；存在时 APE 让位给 CUE 分轨。
+private func collectionContainsCue(matching apeURL: URL, resources: [[String: Any]], skipping index: Int) -> Bool {
+    let apeStem = (apeURL.deletingPathExtension().lastPathComponent as NSString).lowercased
+    for (otherIndex, resource) in resources.enumerated() where otherIndex != index {
+        guard let urlString = resource["url"] as? String,
+              let url = URL(string: urlString), url.isFileURL,
+              url.pathExtension.lowercased() == "cue",
+              (url.deletingPathExtension().lastPathComponent as NSString).lowercased == apeStem else {
+            continue
+        }
+        return true
+    }
+    return false
 }
 
 private let performCommandCallback: RuntimeCall = { _, input, inputLength, output, outputLength in
@@ -221,15 +387,28 @@ private func contentProbe(_ message: [String: Any]) throws -> [String: Any] {
     }
     let maxReadBytes = (message["maxReadBytes"] as? Int) ?? 2_097_152
     guard maxReadBytes > 0 else { throw RuntimeControllerError.invalidSession }
-    let sniffBytes = 510 * 2048 + 8
     var result: [String: Any] = ["contractVersion": 1, "disposition": "unmatched"]
-    guard fallbackURL.pathExtension.lowercased() == "iso", maxReadBytes >= sniffBytes else {
-        return result
-    }
-    let access = RuntimeResourceAccess(resource: resource, fallbackURL: fallbackURL)
-    if SACDISOParser.sniff(fileAt: access.url) {
-        result["disposition"] = "matched"
-        result["reason"] = "sacd-master-toc"
+    switch fallbackURL.pathExtension.lowercased() {
+    case "iso":
+        let sniffBytes = 510 * 2048 + 8
+        guard maxReadBytes >= sniffBytes else { return result }
+        let access = RuntimeResourceAccess(resource: resource, fallbackURL: fallbackURL)
+        if SACDISOParser.sniff(fileAt: access.url) {
+            result["disposition"] = "matched"
+            result["reason"] = "sacd-master-toc"
+        }
+    case "cue":
+        // 探针只确认“单 APE 整轨 CUE”，不建会话不碰设备；采样率未知时按 44.1k 解析取文件名。
+        let access = RuntimeResourceAccess(resource: resource, fallbackURL: fallbackURL)
+        if let data = try? Data(contentsOf: access.url),
+           let text = APECueSheetParser.decodeText(data),
+           let sheet = APECueSheetParser.parse(text: text, cueURL: access.url, sampleRate: 44100),
+           sheet.tracks.count > 1 {
+            result["disposition"] = "matched"
+            result["reason"] = "ape-cue-sheet"
+        }
+    default:
+        break
     }
     return result
 }
@@ -264,17 +443,14 @@ private func makeSession(
 ) -> [String: Any] {
     let source = sources[0]
     let url = source.url
-    let descriptor = source.descriptor
-    let duration = descriptor.duration
-    let compression = descriptor.compression == .dst ? "DST" : "DSD"
-    let format = "\(descriptor.kind.rawValue.uppercased()) · \(compression)"
+    let duration = source.duration
     let details = [
         url.lastPathComponent,
-        format,
-        "\(descriptor.channelCount) × \(descriptor.sampleRate) Hz",
+        source.formatSummary,
+        "\(source.channelCount) × \(source.sampleRate) Hz",
         duration.map { String(format: "%.2f s", $0) }
     ].compactMap { $0 }.joined(separator: "\n")
-    let compatibleDevices = devices.filter { $0.potentialDoPDSDRates.contains(descriptor.sampleRate) }
+    let compatibleDevices = devices.filter { isDeviceCompatible($0, source: source) }
     let selected = compatibleDevices.first(where: \.isSystemDefault) ?? compatibleDevices.first
     let deviceObjects: [[String: Any]] = devices.map { device in
         [
@@ -284,7 +460,8 @@ private func makeSession(
             "isConnected": device.isConnected,
             "isCompatible": compatibleDevices.contains { $0.id == device.id },
             "hasHardwareVolume": device.hasHardwareVolume,
-            "supportedDoPRates": device.potentialDoPDSDRates
+            "supportedDoPRates": device.potentialDoPDSDRates,
+            "supportedPCMSampleRates": device.supportedPCMSampleRates
         ]
     }
     // 标准媒体/设备操作由宿主 UI 与公共能力承接；这里只提供 availableActions，不再贡献旧菜单命令。
@@ -356,7 +533,7 @@ private func queueObject(
             "isPlayable": true
         ]
         if let artist = $0.artist { item["subtitle"] = artist }
-        if let duration = $0.descriptor.duration { item["duration"] = duration }
+        if let duration = $0.duration { item["duration"] = duration }
         return item
     }
     var object: [String: Any] = [
@@ -376,7 +553,7 @@ private func navigatorObject(
     currentID: String,
     revision: UInt64 = 0
 ) -> [String: Any] {
-    let isContainer = sources.contains { $0.sacdTrackNumber != nil }
+    let isContainer = sources.contains { $0.sacdTrackNumber != nil || $0.cueTrackNumber != nil }
     return [
         "id": "hifi.playback-queue",
         "contractVersion": 1,
@@ -392,7 +569,7 @@ private func navigatorObject(
                 "isCurrent": source.id == currentID
             ]
             if let artist = source.artist { item["subtitle"] = artist }
-            if let duration = source.descriptor.duration {
+            if let duration = source.duration {
                 item["badge"] = formatDuration(duration)
             }
             return item
@@ -418,9 +595,10 @@ private final class HiFiRuntimeController: @unchecked Sendable {
     private var sessions: [UUID: RuntimeSession] = [:]
 
     func registerSession(id: UUID, sources: [RuntimeSource], devices: [HiFiAudioOutputDevice]) {
-        let sampleRate = sources.first?.descriptor.sampleRate
+        let first = sources.first
         let compatible = devices.filter { device in
-            sampleRate.map(device.potentialDoPDSDRates.contains) ?? false
+            guard let first else { return false }
+            return isDeviceCompatible(device, source: first)
         }
         let selectedDeviceID = (compatible.first(where: \.isSystemDefault) ?? compatible.first)?.id
         let record = RuntimeSession(
@@ -515,23 +693,22 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
         lock.unlock()
 
-        synchronizeItem(for: record, status: record.player.status())
+        synchronizeItem(for: record, status: record.engineStatus())
 
         if let queue = session["playbackQueue"] as? [String: Any],
            let items = queue["items"] as? [[String: Any]] {
             let ids = items.compactMap { $0["id"] as? String }
-            let oldSuccessors = record.successors.map(\.id)
+            let oldSuccessors = record.successors.map(\.id) + record.apeSuccessors.map(\.id)
             record.sequenceIDs = ids
-            if case .refresh = action, record.isActive, oldSuccessors != record.successors.map(\.id) {
-                let status = try record.player.stop()
+            let newSuccessors = record.successors.map(\.id) + record.apeSuccessors.map(\.id)
+            if case .refresh = action, record.isActive, oldSuccessors != newSuccessors {
+                let status = try record.stopEngines()
                 synchronizeItem(for: record, status: status)
                 record.samplePosition = status.samplePosition
                 record.isActive = false
                 if let deviceUID = record.selectedDeviceID {
                     do {
-                        try record.player.play(fileAt: record.url, deviceUID: deviceUID,
-                                               startingSample: record.samplePosition, sacdTrackNumber: record.sacdTrackNumber,
-                                               itemID: record.sources[record.currentIndex].id, successors: record.successors)
+                        try record.playCurrent(deviceUID: deviceUID, startingSample: record.samplePosition)
                         record.isActive = true
                     } catch {
                         record.playbackState = "failed"
@@ -547,7 +724,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         switch action {
         case .play:
             do {
-                audioDeviceServiceController.releasePCMForDSD(deviceUID: record.selectedDeviceID)
+                audioDeviceServiceController.releasePCMForExclusive(deviceUID: record.selectedDeviceID)
                 guard let deviceUID = record.selectedDeviceID else {
                     throw RuntimeControllerError.noOutputDevice
                 }
@@ -555,14 +732,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 if record.sampleCount > 0, record.samplePosition >= record.sampleCount {
                     record.samplePosition = 0
                 }
-                try record.player.play(
-                    fileAt: record.url,
-                    deviceUID: deviceUID,
-                    startingSample: record.samplePosition,
-                    sacdTrackNumber: record.sacdTrackNumber,
-                    itemID: record.sources[record.currentIndex].id,
-                    successors: record.successors
-                )
+                try record.playCurrent(deviceUID: deviceUID, startingSample: record.samplePosition)
                 record.playbackState = "playing"
                 record.underrunCount = 0
                 record.failureDescription = nil
@@ -582,7 +752,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             lock.unlock()
             // 恢复后尚未起播的会话保留 seek 位置，也不能停止另一窗口持有的输出。
             if ownsPlayer {
-                let status = try record.player.stop()
+                let status = try record.stopEngines()
                 synchronizeItem(for: record, status: status)
                 record.samplePosition = status.samplePosition
                 record.underrunCount = status.underrunCount
@@ -600,7 +770,8 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 UInt64(min(requestedPosition * Double(record.sampleRate), Double(record.sampleCount))),
                 record.sampleCount
             )
-            let targetSample = requestedSample - requestedSample % 16
+            // DSD seek 按整 DoP 帧对齐；PCM 按帧精确。
+            let targetSample = record.isAPE ? requestedSample : requestedSample - requestedSample % 16
             lock.lock()
             let wasPlaying = record.isActive
             if wasPlaying { record.isActive = false }
@@ -609,18 +780,11 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             record.underrunCount = 0
             if wasPlaying {
                 do {
-                    _ = try record.player.stop()
+                    _ = try record.stopEngines()
                     guard let deviceUID = record.selectedDeviceID else {
                         throw RuntimeControllerError.noOutputDevice
                     }
-                    try record.player.play(
-                        fileAt: record.url,
-                        deviceUID: deviceUID,
-                        startingSample: targetSample,
-                        sacdTrackNumber: record.sacdTrackNumber,
-                        itemID: record.sources[record.currentIndex].id,
-                        successors: record.successors
-                    )
+                    try record.playCurrent(deviceUID: deviceUID, startingSample: targetSample)
                     record.playbackState = "playing"
                     record.failureDescription = nil
                     lock.lock()
@@ -661,7 +825,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         let records = Array(sessions.values)
         sessions.removeAll()
         lock.unlock()
-        for record in records { _ = try? record.player.stop() }
+        for record in records { record.stopEnginesQuietly() }
     }
 
     func stopForExternalPCM(deviceUID: String) throws {
@@ -673,7 +837,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         let records = sessions.values.filter { $0.isActive && $0.selectedDeviceID == deviceUID }
         lock.unlock()
         for record in records {
-            let status = try record.player.stop()
+            let status = try record.stopEngines()
             synchronizeItem(for: record, status: status)
             record.isActive = false
             record.samplePosition = status.samplePosition
@@ -684,12 +848,15 @@ private final class HiFiRuntimeController: @unchecked Sendable {
     }
 
     /// 设备插拔后立刻刷新会话内的设备列表；当前独占设备离线时暂停并回退到兼容的系统默认设备，
-    /// 若没有任何可支持当前 DSD 速率的设备则置为失败，宿主据此给出警告且无法播放。
+    /// 若没有任何可支持当前 DSD/PCM 速率的设备则置为失败，宿主据此给出警告且无法播放。
     private func refreshDeviceSelection(for record: RuntimeSession, session: inout [String: Any]) {
         guard let freshDevices = try? CoreAudioDeviceCatalog.outputDevices() else { return }
         guard var selection = session["audioDeviceSelection"] as? [String: Any] else { return }
         let sampleRate = record.sampleRate
-        let compatible = freshDevices.filter { $0.isConnected && $0.potentialDoPDSDRates.contains(sampleRate) }
+        let isAPE = record.isAPE
+        let compatible = freshDevices.filter {
+            $0.isConnected && isDeviceCompatible($0, sampleRate: sampleRate, isAPE: isAPE)
+        }
         let deviceObjects: [[String: Any]] = freshDevices.map { device in
             [
                 "id": device.id,
@@ -698,20 +865,21 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 "isConnected": device.isConnected,
                 "isCompatible": compatible.contains { $0.id == device.id },
                 "hasHardwareVolume": device.hasHardwareVolume,
-                "supportedDoPRates": device.potentialDoPDSDRates
+                "supportedDoPRates": device.potentialDoPDSDRates,
+                "supportedPCMSampleRates": device.supportedPCMSampleRates
             ]
         }
         let currentID = record.selectedDeviceID
         let currentStillUsable = currentID.flatMap { id in
             freshDevices.first(where: { $0.id == id })
-        }.map { $0.isConnected && $0.potentialDoPDSDRates.contains(sampleRate) } ?? false
+        }.map { $0.isConnected && isDeviceCompatible($0, sampleRate: sampleRate, isAPE: isAPE) } ?? false
 
         if !currentStillUsable {
             lock.lock()
             let wasPlaying = record.isActive
             lock.unlock()
             if wasPlaying {
-                if let status = try? record.player.stop() {
+                if let status = try? record.stopEngines() {
                     synchronizeItem(for: record, status: status)
                     record.samplePosition = status.samplePosition
                     record.underrunCount = status.underrunCount
@@ -730,7 +898,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 // 没有任何可支持设备时给出明确失败，宿主显示警告且播放命令会被禁用。
                 if wasPlaying || record.playbackState == "playing" || currentID != nil {
                     record.playbackState = "failed"
-                    record.failureDescription = HiFiPlaybackError.unsupportedDoPRate.localizationKey
+                    record.failureDescription = isAPE
+                        ? HiFiPlaybackError.unsupportedPCMRate.localizationKey
+                        : HiFiPlaybackError.unsupportedDoPRate.localizationKey
                 }
             }
         }
@@ -761,16 +931,23 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         guard let device = devices.first(where: { $0["id"] as? String == selectedID }) else {
             throw RuntimeControllerError.noOutputDevice
         }
-        let supportedRates = (device["supportedDoPRates"] as? [NSNumber])?.map(\.intValue) ?? []
-        guard supportedRates.contains(record.sampleRate) else {
-            throw RuntimeControllerError.noOutputDevice
+        if record.isAPE {
+            let pcmRates = (device["supportedPCMSampleRates"] as? [NSNumber])?.map(\.doubleValue) ?? []
+            guard pcmRates.contains(Double(record.sampleRate)) else {
+                throw RuntimeControllerError.noOutputDevice
+            }
+        } else {
+            let supportedRates = (device["supportedDoPRates"] as? [NSNumber])?.map(\.intValue) ?? []
+            guard supportedRates.contains(record.sampleRate) else {
+                throw RuntimeControllerError.noOutputDevice
+            }
         }
 
         lock.lock()
         let wasPlaying = record.isActive
         lock.unlock()
         if wasPlaying {
-            let status = try record.player.stop()
+            let status = try record.stopEngines()
             synchronizeItem(for: record, status: status)
             record.samplePosition = status.samplePosition
             record.underrunCount = status.underrunCount
@@ -786,16 +963,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         selection["revision"] = ((selection["revision"] as? NSNumber)?.uint64Value ?? 0) + 1
         if wasPlaying {
             do {
-                audioDeviceServiceController.releasePCMForDSD(deviceUID: selectedID)
+                audioDeviceServiceController.releasePCMForExclusive(deviceUID: selectedID)
                 try stopTrackedPlayback(beforeStarting: record)
-                try record.player.play(
-                    fileAt: record.url,
-                    deviceUID: selectedID,
-                    startingSample: record.samplePosition,
-                    sacdTrackNumber: record.sacdTrackNumber,
-                    itemID: record.sources[record.currentIndex].id,
-                    successors: record.successors
-                )
+                try record.playCurrent(deviceUID: selectedID, startingSample: record.samplePosition)
                 record.playbackState = "playing"
                 record.failureDescription = nil
                 lock.lock()
@@ -819,7 +989,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         let wasPlaying = record.isActive
         lock.unlock()
         // 释放失败不能报告关闭成功，也不能先删除记录导致无法重试。
-        if wasPlaying { _ = try record.player.stop() }
+        if wasPlaying { _ = try record.stopEngines() }
         lock.lock()
         record.isActive = false
         sessions.removeValue(forKey: record.id)
@@ -832,7 +1002,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         let wasPlaying = record.isActive
         if wasPlaying { record.isActive = false }
         lock.unlock()
-        if wasPlaying { _ = try? record.player.stop() }
+        if wasPlaying { record.stopEnginesQuietly() }
         // 宿主列表切歌时，自然播完已经清除会话的 isActive 标记；若上一曲已到结尾，仍应接着播。
         let reachedEnd = record.sampleCount > 0 && record.samplePosition + 16 >= record.sampleCount
         let completedNaturally = record.playbackState == "stopped"
@@ -846,15 +1016,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         record.playbackState = "paused"
         if shouldPlay, let deviceUID = record.selectedDeviceID {
             do {
-                audioDeviceServiceController.releasePCMForDSD(deviceUID: deviceUID)
+                audioDeviceServiceController.releasePCMForExclusive(deviceUID: deviceUID)
                 try stopTrackedPlayback(beforeStarting: record)
-                try record.player.play(
-                    fileAt: record.url,
-                    deviceUID: deviceUID,
-                    sacdTrackNumber: record.sacdTrackNumber,
-                    itemID: record.sources[record.currentIndex].id,
-                    successors: record.successors
-                )
+                try record.playCurrent(deviceUID: deviceUID, startingSample: 0)
                 record.playbackState = "playing"
                 lock.lock(); record.isActive = true; lock.unlock()
             } catch {
@@ -879,7 +1043,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
               let currentIndex = reordered.firstIndex(where: { $0.id == currentID }) else { return }
         let wasPlaying = record.isActive
         if wasPlaying {
-            let status = try record.player.stop()
+            let status = try record.stopEngines()
             synchronizeItem(for: record, status: status)
             record.samplePosition = status.samplePosition
             record.isActive = false
@@ -891,9 +1055,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         record.queueRevision &+= 1
         if wasPlaying, let deviceUID = record.selectedDeviceID {
             do {
-                try record.player.play(fileAt: record.url, deviceUID: deviceUID,
-                                       startingSample: record.samplePosition, sacdTrackNumber: record.sacdTrackNumber,
-                                       itemID: audibleID, successors: record.successors)
+                try record.playCurrent(deviceUID: deviceUID, startingSample: record.samplePosition)
                 record.isActive = true
             } catch {
                 record.playbackState = "failed"
@@ -921,7 +1083,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         }
     }
 
-    private func synchronizeItem(for record: RuntimeSession, status: HALDSFPlaybackStatus) {
+    private func synchronizeItem(for record: RuntimeSession, status: EngineStatus) {
         guard record.isActive, let itemID = status.currentItemID,
               let index = record.sources.firstIndex(where: { $0.id == itemID }),
               index != record.currentIndex else { return }
@@ -931,20 +1093,22 @@ private final class HiFiRuntimeController: @unchecked Sendable {
     }
 
     private func updatePlaybackState(for record: RuntimeSession, session: inout [String: Any]) {
-        var status = record.player.status()
+        var status = record.engineStatus()
         synchronizeItem(for: record, status: status)
         lock.lock()
+        let isContainer = record.isSACDContainer || record.isCUEContainer
+        let currentSuccessors = record.isAPE ? record.apeSuccessors.map(\.id) : record.successors.map(\.id)
         let shouldAdvance = record.isActive
             && status.state == .stopped
             && status.samplePosition >= record.sampleCount
-            && !record.successors.isEmpty
-            && !record.isSACDContainer
+            && !currentSuccessors.isEmpty
+            && !isContainer
         lock.unlock()
         if shouldAdvance {
             synchronizeItem(for: record, status: status)
             record.samplePosition = status.samplePosition
-            switchItem(to: record.successors[0].id, record: record)
-            status = record.player.status()
+            switchItem(to: currentSuccessors[0], record: record)
+            status = record.engineStatus()
         }
         lock.lock()
         let wasTracked = record.isActive
@@ -1001,16 +1165,26 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             session["mediaPlayback"] = playback
         }
         if var selection = session["audioDeviceSelection"] as? [String: Any] {
-            selection["activeTransport"] = isPlaying ? "dop" : nil
+            selection["activeTransport"] = isPlaying ? (record.isAPE ? "pcm" : "dop") : nil
             if isPlaying, let deviceID = record.selectedDeviceID,
                let devices = selection["devices"] as? [[String: Any]],
                let device = devices.first(where: { $0["id"] as? String == deviceID }) {
-                selection["statusDescription"] = dopStatusDescription(
-                    sampleRate: record.sampleRate,
-                    sourceChannels: record.sources[record.currentIndex].descriptor.channelCount,
-                    outputChannels: Int(status.outputChannelCount),
-                    deviceName: device["displayName"] as? String ?? deviceID
-                )
+                let deviceName = device["displayName"] as? String ?? deviceID
+                if record.isAPE, let ape = record.sources[record.currentIndex].apeDescriptor {
+                    selection["statusDescription"] = pcmStatusDescription(
+                        sampleRate: ape.sampleRate,
+                        bitsPerSample: ape.bitsPerSample,
+                        channelCount: ape.channelCount,
+                        deviceName: deviceName
+                    )
+                } else {
+                    selection["statusDescription"] = dopStatusDescription(
+                        sampleRate: record.sampleRate,
+                        sourceChannels: record.sources[record.currentIndex].channelCount,
+                        outputChannels: Int(status.outputChannelCount),
+                        deviceName: deviceName
+                    )
+                }
             } else if let reconnectedDevice {
                 selection["statusDescription"] = reconnectedDevice.displayName
             }
@@ -1025,20 +1199,40 @@ private final class RuntimeSession {
     var currentIndex = 0
     var queueRevision: UInt64 = 0
     var url: URL { sources[currentIndex].url }
-    var sampleRate: Int { sources[currentIndex].descriptor.sampleRate }
-    var sampleCount: UInt64 { sources[currentIndex].descriptor.sampleCount ?? 0 }
+    var sampleRate: Int { sources[currentIndex].sampleRate }
+    var sampleCount: UInt64 { sources[currentIndex].sampleCount }
+    var isAPE: Bool { sources[currentIndex].isAPE }
     var sacdTrackNumber: Int? { sources[currentIndex].sacdTrackNumber }
+    var apeStartBlock: UInt64 { sources[currentIndex].apeStartBlock }
+    var apeEndBlock: UInt64? { sources[currentIndex].apeEndBlock }
     var sequenceIDs: [String]?
     var successors: [DSDPlaybackItem] {
-        let orderedIDs = sequenceIDs ?? sources.map(\.id)
-        guard let index = orderedIDs.firstIndex(of: sources[currentIndex].id) else { return [] }
-        let byID = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
-        return orderedIDs.dropFirst(index + 1).compactMap { byID[$0] }.map {
-            DSDPlaybackItem(id: $0.id, url: $0.url, descriptor: $0.descriptor, sacdTrackNumber: $0.sacdTrackNumber)
+        orderedSuccessors().compactMap { source in
+            guard let descriptor = source.dsdDescriptor else { return nil }
+            return DSDPlaybackItem(
+                id: source.id,
+                url: source.url,
+                descriptor: descriptor,
+                sacdTrackNumber: source.sacdTrackNumber
+            )
+        }
+    }
+    var apeSuccessors: [APEPlaybackItem] {
+        orderedSuccessors().compactMap { source in
+            guard let descriptor = source.apeDescriptor else { return nil }
+            return APEPlaybackItem(
+                id: source.id,
+                url: source.url,
+                descriptor: descriptor,
+                startBlock: source.apeStartBlock,
+                endBlock: source.apeEndBlock
+            )
         }
     }
     var isSACDContainer: Bool { sources.contains { $0.sacdTrackNumber != nil } }
+    var isCUEContainer: Bool { sources.contains { $0.cueTrackNumber != nil } }
     let player = HALDSFPlaybackEngine()
+    let pcmPlayer = HALPCMPlaybackEngine()
     var isActive = false
     var selectedDeviceID: String?
     var samplePosition: UInt64 = 0
@@ -1055,21 +1249,154 @@ private final class RuntimeSession {
         self.sources = sources
         self.selectedDeviceID = selectedDeviceID
     }
+
+    private func orderedSuccessors() -> [RuntimeSource] {
+        let orderedIDs = sequenceIDs ?? sources.map(\.id)
+        guard let index = orderedIDs.firstIndex(of: sources[currentIndex].id) else { return [] }
+        let byID = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
+        return orderedIDs.dropFirst(index + 1).compactMap { byID[$0] }
+    }
+
+    /// 按当前曲目格式起播；DSD 走 DoP，APE 走 PCM 独占。
+    func playCurrent(deviceUID: String, startingSample: UInt64) throws {
+        if isAPE {
+            try pcmPlayer.play(
+                fileAt: url,
+                deviceUID: deviceUID,
+                startBlock: apeStartBlock,
+                endBlock: apeEndBlock,
+                startingSample: startingSample,
+                itemID: sources[currentIndex].id,
+                successors: apeSuccessors
+            )
+        } else {
+            try player.play(
+                fileAt: url,
+                deviceUID: deviceUID,
+                startingSample: startingSample,
+                sacdTrackNumber: sacdTrackNumber,
+                itemID: sources[currentIndex].id,
+                successors: successors
+            )
+        }
+    }
+
+    func engineStatus() -> EngineStatus {
+        isAPE ? EngineStatus(pcmPlayer.status()) : EngineStatus(player.status())
+    }
+
+    /// 停止双引擎；只传播当前格式引擎的错误（另一引擎 idle 时停止无副作用）。
+    func stopEngines() throws -> EngineStatus {
+        if isAPE {
+            _ = try? player.stop()
+            return EngineStatus(try pcmPlayer.stop())
+        } else {
+            _ = try? pcmPlayer.stop()
+            return EngineStatus(try player.stop())
+        }
+    }
+
+    func stopEnginesQuietly() {
+        _ = try? player.stop()
+        _ = try? pcmPlayer.stop()
+    }
+}
+
+/// DSD/PCM 双引擎的统一状态快照；字段口径与两引擎一致。
+private struct EngineStatus: Equatable {
+    enum State: Equatable {
+        case idle
+        case playing
+        case stopped
+        case failed
+    }
+
+    let state: State
+    let samplePosition: UInt64
+    let sampleCount: UInt64
+    let underrunCount: UInt64
+    let outputChannelCount: Int
+    let failureDescription: String?
+    let currentItemID: String?
+
+    init(_ status: HALDSFPlaybackStatus) {
+        switch status.state {
+        case .idle: state = .idle
+        case .playing: state = .playing
+        case .stopped: state = .stopped
+        case .failed: state = .failed
+        }
+        samplePosition = status.samplePosition
+        sampleCount = status.sampleCount
+        underrunCount = status.underrunCount
+        outputChannelCount = status.outputChannelCount
+        failureDescription = status.failureDescription
+        currentItemID = status.currentItemID
+    }
+
+    init(_ status: HALPCMPlaybackStatus) {
+        switch status.state {
+        case .idle: state = .idle
+        case .playing: state = .playing
+        case .stopped: state = .stopped
+        case .failed: state = .failed
+        }
+        samplePosition = status.samplePosition
+        sampleCount = status.sampleCount
+        underrunCount = status.underrunCount
+        outputChannelCount = status.outputChannelCount
+        failureDescription = status.failureDescription
+        currentItemID = status.currentItemID
+    }
 }
 
 private final class RuntimeSource {
     let id: String
     let access: RuntimeResourceAccess
-    let descriptor: DSDContainerDescriptor
+    let dsdDescriptor: DSDContainerDescriptor?
+    let apeDescriptor: APEAudioDescriptor?
+    let apeStartBlock: UInt64
+    let apeEndBlock: UInt64?
     let title: String?
     let artist: String?
     let album: String?
     let sacdTrackNumber: Int?
+    let cueTrackNumber: Int?
     var url: URL { access.url }
+    var isAPE: Bool { apeDescriptor != nil }
+    var sampleRate: Int {
+        dsdDescriptor?.sampleRate ?? apeDescriptor?.sampleRate ?? 0
+    }
+    var sampleCount: UInt64 {
+        if let sampleCount = dsdDescriptor?.sampleCount { return sampleCount }
+        guard let ape = apeDescriptor else { return 0 }
+        let end = min(apeEndBlock ?? ape.totalBlocks, ape.totalBlocks)
+        let start = min(apeStartBlock, end)
+        return end - start
+    }
+    var channelCount: Int {
+        dsdDescriptor?.channelCount ?? apeDescriptor?.channelCount ?? 0
+    }
+    var duration: TimeInterval? {
+        if let dsdDescriptor { return dsdDescriptor.duration }
+        guard let ape = apeDescriptor, ape.sampleRate > 0 else { return nil }
+        return TimeInterval(sampleCount) / TimeInterval(ape.sampleRate)
+    }
+    var formatSummary: String {
+        if let dsdDescriptor {
+            let compression = dsdDescriptor.compression == .dst ? "DST" : "DSD"
+            return "\(dsdDescriptor.kind.rawValue.uppercased()) · \(compression)"
+        }
+        if let ape = apeDescriptor {
+            return "APE · \(ape.compressionName)"
+        }
+        return "Audio"
+    }
     var displayTitle: String {
         let value = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let value, !value.isEmpty { return value }
         if let sacdTrackNumber { return "Track \(sacdTrackNumber)" }
+        if let cueTrackNumber { return "Track \(cueTrackNumber)" }
         return url.deletingPathExtension().lastPathComponent
     }
 
@@ -1084,11 +1411,39 @@ private final class RuntimeSource {
     ) {
         self.id = id
         self.access = access
-        self.descriptor = descriptor
+        self.dsdDescriptor = descriptor
+        self.apeDescriptor = nil
+        self.apeStartBlock = 0
+        self.apeEndBlock = nil
         self.title = title
         self.artist = artist
         self.album = album
         self.sacdTrackNumber = sacdTrackNumber
+        self.cueTrackNumber = nil
+    }
+
+    init(
+        id: String,
+        access: RuntimeResourceAccess,
+        apeDescriptor: APEAudioDescriptor,
+        apeStartBlock: UInt64 = 0,
+        apeEndBlock: UInt64? = nil,
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        cueTrackNumber: Int? = nil
+    ) {
+        self.id = id
+        self.access = access
+        self.dsdDescriptor = nil
+        self.apeDescriptor = apeDescriptor
+        self.apeStartBlock = apeStartBlock
+        self.apeEndBlock = apeEndBlock
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.sacdTrackNumber = nil
+        self.cueTrackNumber = cueTrackNumber
     }
 }
 
@@ -1160,7 +1515,8 @@ private final class AudioDeviceServiceController: @unchecked Sendable {
         return try snapshot(clientID: clientID, refreshDevices: command == "snapshot")
     }
 
-    func releasePCMForDSD(deviceUID: String?) {
+    /// DSD/APE 独占起播前释放宿主 PCM 租约；同一设备的宿主输出由 stopPlayback 交接。
+    func releasePCMForExclusive(deviceUID: String?) {
         if let deviceUID { releasePCM(deviceUID: deviceUID) }
     }
 
@@ -1253,6 +1609,35 @@ private func dopStatusDescription(
         route = "DoP"
     }
     return "\(dsd) · \(route) · \(deviceName)"
+}
+
+private func isDeviceCompatible(_ device: HiFiAudioOutputDevice, source: RuntimeSource) -> Bool {
+    if source.isAPE {
+        return device.supportedPCMSampleRates.contains(Double(source.sampleRate))
+    }
+    return device.potentialDoPDSDRates.contains(source.sampleRate)
+}
+
+private func isDeviceCompatible(_ device: HiFiAudioOutputDevice, sampleRate: Int, isAPE: Bool) -> Bool {
+    if isAPE {
+        return device.supportedPCMSampleRates.contains(Double(sampleRate))
+    }
+    return device.potentialDoPDSDRates.contains(sampleRate)
+}
+
+private func pcmStatusDescription(
+    sampleRate: Int,
+    bitsPerSample: Int,
+    channelCount: Int,
+    deviceName: String
+) -> String {
+    let rate: String
+    if sampleRate % 1000 == 0 {
+        rate = "\(sampleRate / 1000) kHz"
+    } else {
+        rate = String(format: "%.1f kHz", Double(sampleRate) / 1000)
+    }
+    return "\(rate) · \(bitsPerSample)-bit · \(channelCount)ch PCM · \(deviceName)"
 }
 
 private func failureKey(_ error: Error) -> String {

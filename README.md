@@ -4,7 +4,7 @@ Advanced local audio playback extension for [foofoil](https://github.com/foofoil
 
 Hi-Fi is a first-party foofoil extension. It is not a standalone player. Install foofoil first, then install Hi-Fi from inside the app (or load a development bundle while building from source).
 
-The extension adds high-resolution and DSD playback that the lightweight foofoil core does not ship: DSF/DFF, uncompressed stereo SACD ISO, SACD DST (in progress), enhanced handling of formats the system already plays, output-device selection, DoP, and music-oriented session features. Playback lists are projected through foofoil's shared navigator, not a private sidebar.
+The extension adds high-resolution and DSD playback that the lightweight foofoil core does not ship: DSF/DFF, uncompressed stereo SACD ISO, APE with CUE sheets (Monkey's Audio decoded in-extension to exclusive PCM), SACD DST (in progress), enhanced handling of formats the system already plays, output-device selection, DoP, and music-oriented session features. Playback lists are projected through foofoil's shared navigator, not a private sidebar.
 
 [简体中文](README.zh-CN.md)
 
@@ -15,6 +15,7 @@ The current tree is the Phase 0 development prototype extracted from foofoil's `
 - DSF / raw DFF / uncompressed stereo SACD ISO → DoP → CoreAudio HAL → USB DAC
 - Stereo DSD64 DSF and stereo DFF verified on an SMSL DAC; 5.0 DFF uses surround DoP when the device allows it, otherwise a stereo fold
 - Uncompressed stereo SACD ISO is sniffed (`SACDMTOC`), shown as a CUE-like host list (titles + track numbers), and played from Stereo Area 3-in-14/3-in-16 without writing temporary DSF. List, seek, and sound verified on SMSL
+- APE (Monkey's Audio, BSD-3 decoder vendored as `Sources/MACLib`) is decoded in-extension and played as bit-perfect exclusive PCM through CoreAudio HAL with Hog Mode; single `.ape` opens whole-disc, and a sibling or opened `.cue` projects CUE track lists with seeking and track advance. Listening verification on a DAC is pending user confirmation
 - Host session commands for play, pause, progress, output-device selection, and device release on close
 
 Not yet a shipping release. DSD playback is DoP-only; DSD → PCM conversion is out of scope. DSD64/128/256 and history track/position restore are hardware/user-verified. Per-device PCM/DSD handoff is implemented and awaiting hardware regression; system-default playback is excluded from arbitration. Remembering the last selected DAC remains unfinished. Other tested device scenarios have no reported issues. Existing metadata needs no additional work. Later scope includes DST / SACD multichannel, process-isolation evaluation, and signed/notarized Releases for in-app install.

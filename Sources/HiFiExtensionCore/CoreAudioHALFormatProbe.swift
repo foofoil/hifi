@@ -11,6 +11,14 @@ public struct DoPTransportPlan: Codable, Equatable, Sendable {
     public let physicalFormat: HiFiAudioPhysicalFormat
 }
 
+public struct PCMTransportPlan: Codable, Equatable, Sendable {
+    public let deviceUID: String
+    public let streamID: UInt32
+    public let sampleRate: Double
+    public let channelCount: Int
+    public let physicalFormat: HiFiAudioPhysicalFormat
+}
+
 public struct HALFormatProbeResult: Codable, Equatable, Sendable {
     public let plan: DoPTransportPlan
     public let appliedFormat: HiFiAudioPhysicalFormat
@@ -44,6 +52,7 @@ public enum CoreAudioHALFormatProbeError: Error, Equatable, Sendable {
     case deviceNotFound(String)
     case noOutputStream
     case noDoPTransport(Int)
+    case noPCMTransport(Double)
     case propertyRead(OSStatus)
     case propertyNotSettable
     case propertyWrite(OSStatus)
@@ -94,6 +103,47 @@ public enum CoreAudioHALFormatProbe {
             streamID: selected.streamID,
             dsdSampleRate: dsdSampleRate,
             pcmCarrierSampleRate: carrierRate,
+            physicalFormat: describe(selected.format)
+        )
+    }
+
+    /// APE 等 PCM 独占输出的传输规划：整数 physical + Float32 virtual，与 DoP 同一配置顺序。
+    public static func planPCM(
+        deviceUID: String,
+        sampleRate: Double,
+        channelCount: Int,
+        bitsPerSample: UInt32
+    ) throws -> PCMTransportPlan {
+        guard sampleRate.isFinite, sampleRate > 0, channelCount > 0 else {
+            throw CoreAudioHALFormatProbeError.noPCMTransport(sampleRate)
+        }
+        let deviceID = try resolveDeviceID(uid: deviceUID)
+        let streams = try outputStreams(deviceID: deviceID)
+        guard !streams.isEmpty else { throw CoreAudioHALFormatProbeError.noOutputStream }
+        let channels = UInt32(channelCount)
+
+        let candidates = try streams.flatMap { streamID in
+            try availableFormats(streamID: streamID).compactMap { ranged -> RawCandidate? in
+                let format = ranged.mFormat
+                guard ranged.mSampleRateRange.mMinimum <= sampleRate,
+                      sampleRate <= ranged.mSampleRateRange.mMaximum,
+                      format.mFormatID == kAudioFormatLinearPCM,
+                      format.mFormatFlags & kAudioFormatFlagIsFloat == 0,
+                      format.mChannelsPerFrame == channels,
+                      format.mBitsPerChannel >= bitsPerSample else { return nil }
+                var exact = format
+                exact.mSampleRate = sampleRate
+                return RawCandidate(streamID: streamID, format: exact)
+            }
+        }
+        guard let selected = candidates.sorted(by: preferredCandidate).first else {
+            throw CoreAudioHALFormatProbeError.noPCMTransport(sampleRate)
+        }
+        return PCMTransportPlan(
+            deviceUID: deviceUID,
+            streamID: selected.streamID,
+            sampleRate: sampleRate,
+            channelCount: channelCount,
             physicalFormat: describe(selected.format)
         )
     }
@@ -596,6 +646,22 @@ public enum CoreAudioHALFormatProbe {
             return format
         }).first else {
             throw CoreAudioHALFormatProbeError.noDoPTransport(plan.dsdSampleRate)
+        }
+        return target
+    }
+
+    static func targetFormat(for plan: PCMTransportPlan) throws -> AudioStreamBasicDescription {
+        guard let target = try availableFormats(streamID: plan.streamID).compactMap({ ranged -> AudioStreamBasicDescription? in
+            var format = ranged.mFormat
+            guard ranged.mSampleRateRange.mMinimum <= plan.sampleRate,
+                  plan.sampleRate <= ranged.mSampleRateRange.mMaximum,
+                  format.mFormatFlags == plan.physicalFormat.formatFlags,
+                  format.mBitsPerChannel == plan.physicalFormat.bitsPerChannel,
+                  format.mBytesPerFrame == plan.physicalFormat.bytesPerFrame else { return nil }
+            format.mSampleRate = plan.sampleRate
+            return format
+        }).first else {
+            throw CoreAudioHALFormatProbeError.noPCMTransport(plan.sampleRate)
         }
         return target
     }
