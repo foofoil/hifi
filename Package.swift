@@ -20,6 +20,8 @@ let package = Package(
             cxxSettings: [
                 .headerSearchPath("ThirdParty/MAC/Source/Shared"),
                 .headerSearchPath("ThirdParty/MAC/Source/MACLib"),
+                // 内嵌 Monkey's Audio 上游未标 override；第三方源码整体抑制该一致性告警，不改上游文件。
+                .unsafeFlags(["-Wno-inconsistent-missing-override"]),
             ]
         ),
         .target(name: "HiFiExtensionCore", dependencies: ["MACLib"]),
