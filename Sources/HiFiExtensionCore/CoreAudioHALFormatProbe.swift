@@ -107,7 +107,8 @@ public enum CoreAudioHALFormatProbe {
         )
     }
 
-    /// APE 等 PCM 独占输出的传输规划：整数 physical + Float32 virtual，与 DoP 同一配置顺序。
+    /// APE 等 PCM 独占输出的传输规划：physical 优先同深度整数格式，仅提供浮点时退化为 Float32；
+    /// virtual 恒为 Float32，与 DoP 同一配置顺序。内建输出只暴露浮点 physical。
     public static func planPCM(
         deviceUID: String,
         sampleRate: Double,
@@ -125,18 +126,25 @@ public enum CoreAudioHALFormatProbe {
         let candidates = try streams.flatMap { streamID in
             try availableFormats(streamID: streamID).compactMap { ranged -> RawCandidate? in
                 let format = ranged.mFormat
+                let isFloat = format.mFormatFlags & kAudioFormatFlagIsFloat != 0
                 guard ranged.mSampleRateRange.mMinimum <= sampleRate,
                       sampleRate <= ranged.mSampleRateRange.mMaximum,
                       format.mFormatID == kAudioFormatLinearPCM,
-                      format.mFormatFlags & kAudioFormatFlagIsFloat == 0,
                       format.mChannelsPerFrame == channels,
-                      format.mBitsPerChannel >= bitsPerSample else { return nil }
+                      isFloat || format.mBitsPerChannel >= bitsPerSample else { return nil }
                 var exact = format
                 exact.mSampleRate = sampleRate
                 return RawCandidate(streamID: streamID, format: exact)
             }
         }
-        guard let selected = candidates.sorted(by: preferredCandidate).first else {
+        guard let selected = candidates
+            .sorted(by: { lhs, rhs in
+                let lhsScore = pcmCandidateScore(lhs.format, bitsPerSample: bitsPerSample)
+                let rhsScore = pcmCandidateScore(rhs.format, bitsPerSample: bitsPerSample)
+                if lhsScore != rhsScore { return lhsScore > rhsScore }
+                return lhs.streamID < rhs.streamID
+            })
+            .first else {
             throw CoreAudioHALFormatProbeError.noPCMTransport(sampleRate)
         }
         return PCMTransportPlan(
@@ -360,6 +368,19 @@ public enum CoreAudioHALFormatProbe {
         if format.mBitsPerChannel == 32, isPacked { return 350 }
         if format.mBitsPerChannel == 24, !isPacked, isNonMixable { return 300 }
         return Int(format.mBitsPerChannel)
+    }
+
+    /// PCM 输出优先与源位深相同的整数格式（HAL 不做多余位宽转换），浮点 physical 仅作兜底。
+    private static func pcmCandidateScore(
+        _ format: AudioStreamBasicDescription,
+        bitsPerSample: UInt32
+    ) -> Int {
+        guard format.mFormatFlags & kAudioFormatFlagIsFloat == 0 else { return 100 }
+        if format.mBitsPerChannel == bitsPerSample { return 400 }
+        if format.mBitsPerChannel > bitsPerSample {
+            return format.mBitsPerChannel == 24 ? 300 : 250
+        }
+        return 0
     }
 
     static func acquireHogModeIfAvailable(deviceID: AudioDeviceID) throws -> Bool {

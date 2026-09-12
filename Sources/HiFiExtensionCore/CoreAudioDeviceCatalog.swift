@@ -329,14 +329,20 @@ public enum CoreAudioDeviceCatalog {
     }
 
     private static func hasHardwareVolume(_ deviceID: AudioDeviceID) -> Bool {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var isSettable = DarwinBoolean(false)
-        return AudioObjectHasProperty(deviceID, &address)
-            && AudioObjectIsPropertySettable(deviceID, &address, &isSettable) == noErr
-            && isSettable.boolValue
+        // USB DAC 常见只在 1/2 声道暴露音量；主元素可为空，不能只看 element main。
+        for element: UInt32 in [kAudioObjectPropertyElementMain, 1, 2] {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioDevicePropertyScopeOutput,
+                mElement: element
+            )
+            var isSettable = DarwinBoolean(false)
+            if AudioObjectHasProperty(deviceID, &address),
+               AudioObjectIsPropertySettable(deviceID, &address, &isSettable) == noErr,
+               isSettable.boolValue {
+                return true
+            }
+        }
+        return false
     }
 }

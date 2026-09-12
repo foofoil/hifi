@@ -49,8 +49,15 @@ public enum APECueSheetParser {
     public static let frameRate: Int64 = 75
 
     /// 读取并解析；非单 APE 文件的 CUE 返回 nil，调用方让出给其他 provider。
-    public static func load(cueAt url: URL, sampleRate: Int) throws -> APECueSheet? {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+    /// `relatedTo` 为沙盒下已授权的同目录主文件（同名 APE），用于关联项读取。
+    public static func load(cueAt url: URL, sampleRate: Int, relatedTo primary: URL? = nil) throws -> APECueSheet? {
+        let data: Data?
+        if let primary {
+            data = RelatedItemAccess.readData(at: url, relatedTo: primary)
+        } else {
+            data = try? Data(contentsOf: url)
+        }
+        guard let data, !data.isEmpty else {
             throw APECueSheetError.unreadable
         }
         guard let text = decodeText(data) else { throw APECueSheetError.unreadable }

@@ -139,6 +139,26 @@ struct APEExtensionMessageTests {
         #expect(items.map { $0["id"] as? String } == ["track:cue:01", "track:cue:02"])
     }
 
+    @Test func duplicateAPEResourcesExpandTracksOnce() throws {
+        let harness = try Harness()
+        let directory = try harness.makeDirectory()
+        let apeURL = directory.appendingPathComponent("CDImage.ape")
+        try Data(contentsOf: Harness.coreFixture(named: "sine05-high", extension: "ape"))
+            .write(to: apeURL)
+        let cueURL = directory.appendingPathComponent("CDImage.cue")
+        try apeCueText(audioFile: "CDImage.ape").write(to: cueURL, atomically: true, encoding: .utf8)
+
+        // 宿主 CUE 列表可能把同一 APE 作为多个资源传入；分轨只能展开一次。
+        let resource: [String: Any] = ["url": apeURL.absoluteString]
+        let session = try harness.createSession(
+            kind: "fileCollection",
+            resources: [resource, resource, resource]
+        )
+        let queue = try #require(session["playbackQueue"] as? [String: Any])
+        let items = try #require(queue["items"] as? [[String: Any]])
+        #expect(items.map { $0["id"] as? String } == ["track:cue:01", "track:cue:02"])
+    }
+
     @Test func nonAPECueFallsThroughToNextProvider() throws {        let harness = try Harness()
         let directory = try harness.makeDirectory()
         let cueURL = directory.appendingPathComponent("other.cue")

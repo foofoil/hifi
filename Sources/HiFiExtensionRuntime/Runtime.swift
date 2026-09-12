@@ -62,6 +62,8 @@ private func prepareSources(request: [String: Any]) throws -> [RuntimeSource] {
     case "fileCollection": resources = request["resources"] as? [[String: Any]] ?? []
     default: resources = []
     }
+    // 宿主 CUE 列表可能把同一 APE 作为多个资源传入；按路径去重，避免曲目被展开多次。
+    var expandedAPEPaths = Set<String>()
     return try resources.enumerated().flatMap { index, resource -> [RuntimeSource] in
         guard let urlString = resource["url"] as? String,
               let fallbackURL = URL(string: urlString), fallbackURL.isFileURL else {
@@ -92,6 +94,7 @@ private func prepareSources(request: [String: Any]) throws -> [RuntimeSource] {
         }
         switch access.url.pathExtension.lowercased() {
         case "ape":
+            guard expandedAPEPaths.insert(access.url.standardizedFileURL.path).inserted else { return [] }
             // 同集合里已有同名 CUE 时以 CUE 分轨为准，避免同一专辑展开两次。
             if resources.count > 1,
                collectionContainsCue(matching: access.url, resources: resources, skipping: index) {
@@ -102,11 +105,15 @@ private func prepareSources(request: [String: Any]) throws -> [RuntimeSource] {
                 index: index
             )
         case "cue":
-            return try cueSources(
+            let sources = try cueSources(
                 cueAccess: access,
                 resources: resources,
                 index: index
             )
+            if let expandedURL = sources.first?.url {
+                expandedAPEPaths.insert(expandedURL.standardizedFileURL.path)
+            }
+            return sources
         default:
             break
         }
@@ -156,8 +163,11 @@ private func cueSources(
     guard HALPCMPlaybackEngine.supportsPlayback(descriptor) else {
         throw RuntimeControllerError.invalidSource
     }
-    guard let sheet = try APECueSheetParser.load(cueAt: cueURL, sampleRate: descriptor.sampleRate),
-          sheet.tracks.count > 1 else {
+    guard let sheet = try APECueSheetParser.load(
+        cueAt: cueURL,
+        sampleRate: descriptor.sampleRate,
+        relatedTo: audioAccess.url
+    ), sheet.tracks.count > 1 else {
         throw RuntimeControllerError.invalidSource
     }
     return cueTrackSources(sheet: sheet, audioAccess: audioAccess, descriptor: descriptor)
@@ -191,8 +201,12 @@ private func apeCueSheet(
     let stem = (url.deletingPathExtension().lastPathComponent as NSString).lowercased
     let cueURL = directory.appendingPathComponent("\(url.deletingPathExtension().lastPathComponent).cue")
     guard FileManager.default.fileExists(atPath: cueURL.path) else { return nil }
-    guard let sheet = try? APECueSheetParser.load(cueAt: cueURL, sampleRate: descriptor.sampleRate),
-          sheet.tracks.count > 1 else { return nil }
+    // 沙盒下同目录 CUE 不在授权范围，必须以已打开的 APE 为主文件走关联项读取。
+    guard let sheet = try? APECueSheetParser.load(
+        cueAt: cueURL,
+        sampleRate: descriptor.sampleRate,
+        relatedTo: url
+    ), sheet.tracks.count > 1 else { return nil }
     // CUE 必须指向当前 APE（按主名比对，容忍 FILE 里写 .wav 的老抓轨）。
     let cueStem = ((sheet.audioFileName as NSString).deletingPathExtension as NSString).lowercased
     guard cueStem == stem else { return nil }
