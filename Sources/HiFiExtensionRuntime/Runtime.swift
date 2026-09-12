@@ -480,6 +480,7 @@ private func makeSession(
     }
     // 标准媒体/设备操作由宿主 UI 与公共能力承接；这里只提供 availableActions，不再贡献旧菜单命令。
     var availableActions = ["refresh", "seek"]
+    if source.isAPE { availableActions.append("selectSystemDefault") }
     if devices.contains(where: { $0.isConnected }) { availableActions.append("selectDevice") }
     if selected != nil { availableActions.append("play") }
     if sources.count > 1 { availableActions.append(contentsOf: ["previous", "next"]) }
@@ -738,7 +739,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         switch action {
         case .play:
             do {
-                audioDeviceServiceController.releasePCMForExclusive(deviceUID: record.selectedDeviceID)
+                if !record.followsSystemDefault {
+                    audioDeviceServiceController.releasePCMForExclusive(deviceUID: record.selectedDeviceID)
+                }
                 guard let deviceUID = record.selectedDeviceID else {
                     throw RuntimeControllerError.noOutputDevice
                 }
@@ -827,6 +830,13 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             try reorderSources(using: orderedIDs, record: record)
         case .refresh:
             break
+        case .selectSystemDefault:
+            guard record.isAPE,
+                  let devices = (session["audioDeviceSelection"] as? [String: Any])?["devices"] as? [[String: Any]],
+                  let selectedID = devices.first(where: { ($0["isSystemDefault"] as? Bool) == true })?["id"] as? String else {
+                throw RuntimeControllerError.noOutputDevice
+            }
+            try selectDevice(selectedID, for: record, session: &session, followsSystemDefault: true)
         case .selectDevice(let selectedID):
             try selectDevice(selectedID, for: record, session: &session)
         }
@@ -848,7 +858,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
 
     private func stopPlayback(on deviceUID: String) throws {
         lock.lock()
-        let records = sessions.values.filter { $0.isActive && $0.selectedDeviceID == deviceUID }
+        let records = sessions.values.filter {
+            $0.isActive && !$0.followsSystemDefault && $0.selectedDeviceID == deviceUID
+        }
         lock.unlock()
         for record in records {
             let status = try record.stopEngines()
@@ -883,10 +895,27 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 "supportedPCMSampleRates": device.supportedPCMSampleRates
             ]
         }
+        // 跟随模式只选真实的系统默认设备；PCM 不持有 hog，因此不会制造默认迁移反馈循环。
+        if record.followsSystemDefault,
+           let target = compatible.first(where: \.isSystemDefault),
+           target.id != record.selectedDeviceID {
+            selection["devices"] = deviceObjects
+            session["audioDeviceSelection"] = selection
+            do {
+                try selectDevice(target.id, for: record, session: &session, followsSystemDefault: true)
+            } catch {
+                record.playbackState = "failed"
+                record.failureDescription = failureKey(error)
+            }
+            return
+        }
         let currentID = record.selectedDeviceID
         let currentStillUsable = currentID.flatMap { id in
             freshDevices.first(where: { $0.id == id })
-        }.map { $0.isConnected && isDeviceCompatible($0, sampleRate: sampleRate, isAPE: isAPE) } ?? false
+        }.map {
+            $0.isConnected && isDeviceCompatible($0, sampleRate: sampleRate, isAPE: isAPE)
+                && (!record.followsSystemDefault || $0.isSystemDefault)
+        } ?? false
 
         if !currentStillUsable {
             lock.lock()
@@ -902,7 +931,8 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                 record.isActive = false
                 lock.unlock()
             }
-            if let fallback = compatible.first(where: \.isSystemDefault) ?? compatible.first {
+            if let fallback = compatible.first(where: \.isSystemDefault)
+                ?? (record.followsSystemDefault ? nil : compatible.first) {
                 record.selectedDeviceID = fallback.id
                 // 离线后切换为跟随系统默认兼容设备时必须暂停，由用户决定是否继续播放。
                 record.playbackState = "paused"
@@ -936,7 +966,8 @@ private final class HiFiRuntimeController: @unchecked Sendable {
     private func selectDevice(
         _ selectedID: String,
         for record: RuntimeSession,
-        session: inout [String: Any]
+        session: inout [String: Any],
+        followsSystemDefault: Bool = false
     ) throws {
         guard var selection = session["audioDeviceSelection"] as? [String: Any] else {
             throw RuntimeControllerError.invalidSession
@@ -972,12 +1003,15 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             lock.unlock()
         }
         record.selectedDeviceID = selectedID
+        record.followsSystemDefault = followsSystemDefault
         selection["selectedDeviceID"] = selectedID
         selection["statusDescription"] = device["displayName"] as? String ?? selectedID
         selection["revision"] = ((selection["revision"] as? NSNumber)?.uint64Value ?? 0) + 1
         if wasPlaying {
             do {
-                audioDeviceServiceController.releasePCMForExclusive(deviceUID: selectedID)
+                if !record.followsSystemDefault {
+                    audioDeviceServiceController.releasePCMForExclusive(deviceUID: selectedID)
+                }
                 try stopTrackedPlayback(beforeStarting: record)
                 try record.playCurrent(deviceUID: selectedID, startingSample: record.samplePosition)
                 record.playbackState = "playing"
@@ -995,7 +1029,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
 
     /// 只交接同一设备，其他 DAC 上的会话可继续播放。
     private func stopTrackedPlayback(beforeStarting record: RuntimeSession) throws {
-        if let uid = record.selectedDeviceID { try stopPlayback(on: uid) }
+        if !record.followsSystemDefault, let uid = record.selectedDeviceID { try stopPlayback(on: uid) }
     }
 
     private func close(_ record: RuntimeSession) throws {
@@ -1030,7 +1064,9 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         record.playbackState = "paused"
         if shouldPlay, let deviceUID = record.selectedDeviceID {
             do {
-                audioDeviceServiceController.releasePCMForExclusive(deviceUID: deviceUID)
+                if !record.followsSystemDefault {
+                    audioDeviceServiceController.releasePCMForExclusive(deviceUID: deviceUID)
+                }
                 try stopTrackedPlayback(beforeStarting: record)
                 try record.playCurrent(deviceUID: deviceUID, startingSample: 0)
                 record.playbackState = "playing"
@@ -1163,6 +1199,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         // 权威可用性只由公共快照表达；宿主不再读取旧 command 的 isEnabled。
         let devices = (session["audioDeviceSelection"] as? [String: Any])?["devices"] as? [[String: Any]] ?? []
         var availableActions = ["refresh", "seek"]
+        if record.isAPE { availableActions.append("selectSystemDefault") }
         if devices.contains(where: { ($0["isConnected"] as? Bool) != false }) {
             availableActions.append("selectDevice")
         }
@@ -1179,6 +1216,7 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             session["mediaPlayback"] = playback
         }
         if var selection = session["audioDeviceSelection"] as? [String: Any] {
+            selection["followsSystemDefault"] = record.followsSystemDefault
             selection["activeTransport"] = isPlaying ? (record.isAPE ? "pcm" : "dop") : nil
             if isPlaying, let deviceID = record.selectedDeviceID,
                let devices = selection["devices"] as? [[String: Any]],
@@ -1249,6 +1287,7 @@ private final class RuntimeSession {
     let pcmPlayer = HALPCMPlaybackEngine()
     var isActive = false
     var selectedDeviceID: String?
+    var followsSystemDefault = false
     var samplePosition: UInt64 = 0
     var underrunCount: UInt64 = 0
     var playbackState = "idle"
@@ -1281,7 +1320,8 @@ private final class RuntimeSession {
                 endBlock: apeEndBlock,
                 startingSample: startingSample,
                 itemID: sources[currentIndex].id,
-                successors: apeSuccessors
+                successors: apeSuccessors,
+                exclusive: !followsSystemDefault
             )
         } else {
             try player.play(

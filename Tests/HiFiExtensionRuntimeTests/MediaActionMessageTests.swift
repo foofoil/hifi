@@ -52,6 +52,7 @@ struct MediaActionMessageTests {
             try message.validate()
             return message.runtimeAction
         }
+        #expect(try runtimeAction(["kind": "selectSystemDefault"]) == .selectSystemDefault)
         #expect(try runtimeAction(["kind": "play"]) == .play)
         #expect(try runtimeAction(["kind": "pause"]) == .pause)
         #expect(try runtimeAction(["kind": "previous"]) == .previous)

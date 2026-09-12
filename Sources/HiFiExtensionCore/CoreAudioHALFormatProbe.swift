@@ -113,7 +113,8 @@ public enum CoreAudioHALFormatProbe {
         deviceUID: String,
         sampleRate: Double,
         channelCount: Int,
-        bitsPerSample: UInt32
+        bitsPerSample: UInt32,
+        requiresMixable: Bool = false
     ) throws -> PCMTransportPlan {
         guard sampleRate.isFinite, sampleRate > 0, channelCount > 0 else {
             throw CoreAudioHALFormatProbeError.noPCMTransport(sampleRate)
@@ -130,6 +131,7 @@ public enum CoreAudioHALFormatProbe {
                 guard ranged.mSampleRateRange.mMinimum <= sampleRate,
                       sampleRate <= ranged.mSampleRateRange.mMaximum,
                       format.mFormatID == kAudioFormatLinearPCM,
+                      (!requiresMixable || format.mFormatFlags & kAudioFormatFlagIsNonMixable == 0),
                       format.mChannelsPerFrame == channels,
                       isFloat || format.mBitsPerChannel >= bitsPerSample else { return nil }
                 var exact = format

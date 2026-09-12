@@ -8,6 +8,7 @@ enum RuntimeAction: Equatable {
     case previous
     case next
     case refresh
+    case selectSystemDefault
     case selectDevice(String)
     case activate(itemID: String)
     case move(orderedIDs: [String])
@@ -15,7 +16,7 @@ enum RuntimeAction: Equatable {
 
 struct MediaPlaybackMessage: Decodable {
     struct Action: Decodable {
-        enum Kind: String, Decodable { case play, pause, previous, next, refresh, seek, selectDevice }
+        enum Kind: String, Decodable { case play, pause, previous, next, refresh, seek, selectDevice, selectSystemDefault }
         let kind: Kind
         let position: Double?
         let deviceID: String?
@@ -41,6 +42,7 @@ struct MediaPlaybackMessage: Decodable {
         case .previous: .previous
         case .next: .next
         case .refresh: .refresh
+        case .selectSystemDefault: .selectSystemDefault
         case .seek: .seek(position: action.position ?? 0)
         case .selectDevice: .selectDevice(action.deviceID ?? "")
         }

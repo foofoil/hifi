@@ -82,7 +82,8 @@ public final class HALPCMPlaybackEngine: @unchecked Sendable {
         endBlock: UInt64? = nil,
         startingSample: UInt64 = 0,
         itemID: String? = nil,
-        successors: [APEPlaybackItem] = []
+        successors: [APEPlaybackItem] = [],
+        exclusive: Bool = true
     ) throws {
         try stop()
         let stream: APERawStream
@@ -100,12 +101,13 @@ public final class HALPCMPlaybackEngine: @unchecked Sendable {
             deviceUID: deviceUID,
             sampleRate: Double(descriptor.sampleRate),
             channelCount: descriptor.channelCount,
-            bitsPerSample: UInt32(descriptor.bitsPerSample)
+            bitsPerSample: UInt32(descriptor.bitsPerSample),
+            requiresMixable: !exclusive
         )
         if startingSample > 0 {
             try stream.seek(toSample: startingSample)
         }
-        let configured = try ConfiguredPCMDevice(plan: plan)
+        let configured = try ConfiguredPCMDevice(plan: plan, exclusive: exclusive)
         do {
             let sequence = PCMPlaybackSequence(
                 source: stream, itemID: itemID, startingSample: startingSample, successors: successors
@@ -243,7 +245,7 @@ private final class ConfiguredPCMDevice: @unchecked Sendable {
     private let originalVirtual: AudioStreamBasicDescription
     private let restored = Atomic<Bool>(false)
 
-    init(plan: PCMTransportPlan) throws {
+    init(plan: PCMTransportPlan, exclusive: Bool) throws {
         deviceUID = plan.deviceUID
         deviceID = try CoreAudioHALFormatProbe.resolveDeviceID(uid: plan.deviceUID)
         streamID = plan.streamID
@@ -260,7 +262,10 @@ private final class ConfiguredPCMDevice: @unchecked Sendable {
         )
         physicalFormat = try CoreAudioHALFormatProbe.targetFormat(for: plan)
         virtualFormat = CoreAudioHALFormatProbe.float32VirtualFormat(for: physicalFormat)
-        let acquiredHogMode = try CoreAudioHALFormatProbe.acquireHogModeIfAvailable(deviceID: deviceID)
+        // 系统默认路由必须保持 mixable 且不申请 hog，避免系统被迫迁移默认设备。
+        let acquiredHogMode = exclusive
+            ? try CoreAudioHALFormatProbe.acquireHogModeIfAvailable(deviceID: deviceID)
+            : false
         self.acquiredHogMode = acquiredHogMode
 
         do {

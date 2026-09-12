@@ -62,6 +62,30 @@ struct APEExtensionMessageTests {
         #expect(body.contains("APE"))
     }
 
+    @Test func apeSystemDefaultModeSurvivesRefreshAndExplicitSelectionExitsIt() throws {
+        let harness = try Harness()
+        let directory = try harness.makeDirectory()
+        let url = directory.appendingPathComponent("solo.ape")
+        try Data(contentsOf: Harness.coreFixture(named: "sine05-high", extension: "ape")).write(to: url)
+        var session = try harness.createSession(kind: "singleFile", resources: [["url": url.absoluteString]])
+        let devices = try #require((session["audioDeviceSelection"] as? [String: Any])?["devices"] as? [[String: Any]])
+        guard let device = devices.first(where: {
+            ($0["isSystemDefault"] as? Bool) == true && ($0["isCompatible"] as? Bool) == true
+        }), let uid = device["id"] as? String else { return }
+        session = try harness.perform(commandID: "media.transport", session: session,
+            fields: ["contractVersion": 1, "action": ["kind": "selectSystemDefault"]])
+        for _ in 0..<3 {
+            session = try harness.perform(commandID: "media.transport", session: session,
+                fields: ["contractVersion": 1, "action": ["kind": "refresh"]])
+            let selection = try #require(session["audioDeviceSelection"] as? [String: Any])
+            #expect(selection["followsSystemDefault"] as? Bool == true)
+            #expect(selection["selectedDeviceID"] as? String == uid)
+        }
+        session = try harness.perform(commandID: "media.transport", session: session,
+            fields: ["contractVersion": 1, "action": ["kind": "selectDevice", "deviceID": uid]])
+        #expect((session["audioDeviceSelection"] as? [String: Any])?["followsSystemDefault"] as? Bool == false)
+    }
+
     @Test func createSessionForCuePlusAPEProjectsTracks() throws {
         let harness = try Harness()
         let directory = try harness.makeDirectory()
