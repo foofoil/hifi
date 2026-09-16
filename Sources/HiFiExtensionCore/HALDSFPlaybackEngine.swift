@@ -76,6 +76,61 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
         successors: [DSDPlaybackItem] = []
     ) throws {
         try stop()
+        try startPlayback(
+            fileAt: url,
+            deviceUID: deviceUID,
+            startingSample: startingSample,
+            sacdTrackNumber: sacdTrackNumber,
+            itemID: itemID,
+            successors: successors,
+            reusing: nil
+        )
+    }
+
+    /// 原地跳转：保留已配置的独占格式与 hog，只重建读取源后重起 IO。
+    /// 避免像 `play` 那样恢复再重设设备格式，否则每次快进 DAC 都要重新锁定采样率。
+    @discardableResult
+    public func seek(
+        fileAt url: URL,
+        deviceUID: String,
+        startingSample: UInt64,
+        sacdTrackNumber: Int? = nil,
+        itemID: String? = nil,
+        successors: [DSDPlaybackItem] = []
+    ) throws -> HALDSFPlaybackStatus {
+        let retained: ConfiguredDevice?
+        do {
+            retained = try detachSessionKeepingDevice()
+        } catch {
+            throw HiFiPlaybackError.from(error)
+        }
+        do {
+            try startPlayback(
+                fileAt: url,
+                deviceUID: deviceUID,
+                startingSample: startingSample,
+                sacdTrackNumber: sacdTrackNumber,
+                itemID: itemID,
+                successors: successors,
+                reusing: retained
+            )
+        } catch {
+            // 重起失败时归还保活的独占配置，避免留下无 IO 的 hog。
+            if let retained { try? retained.restore() }
+            throw HiFiPlaybackError.from(error)
+        }
+        return status()
+    }
+
+    private func startPlayback(
+        fileAt url: URL,
+        deviceUID: String,
+        startingSample: UInt64,
+        sacdTrackNumber: Int?,
+        itemID: String?,
+        successors: [DSDPlaybackItem],
+        reusing retained: ConfiguredDevice?
+    ) throws {
         let descriptor: DSDContainerDescriptor
         if SACDISOParser.sniff(fileAt: url) {
             descriptor = try SACDISOParser.parse(fileAt: url).containerDescriptor(trackNumber: sacdTrackNumber)
@@ -117,7 +172,17 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
         if startingSample > 0 {
             try stream.seek(toSample: startingSample)
         }
-        let configured = try ConfiguredDevice(plan: selected.plan)
+        // 同一设备与同一物理格式沿用已配置的独占输出；否则先恢复旧配置再重新探测应用。
+        // 这里用 try? 计算目标格式：即使取其失败，也要先归还 retained 的 hog 再走新配置的错误路径。
+        let reuseTarget = try? CoreAudioHALFormatProbe.targetFormat(for: selected.plan)
+        let configured: ConfiguredDevice
+        if let retained, let reuseTarget,
+           retained.canReuse(deviceUID: selected.plan.deviceUID, targetPhysicalFormat: reuseTarget) {
+            configured = retained
+        } else {
+            if let retained { try? retained.restore() }
+            configured = try ConfiguredDevice(plan: selected.plan)
+        }
         do {
             let source = try DSFDoPSource(
                 stream: stream,
@@ -183,6 +248,41 @@ public final class HALDSFPlaybackEngine: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return activeSession?.status(state: .playing) ?? lastStatus
+    }
+
+    /// 摘掉当前会话但不恢复设备格式，返回可复用的独占配置；无活动会话时返回 nil。
+    private func detachSessionKeepingDevice() throws -> ConfiguredDevice? {
+        lock.lock()
+        guard let session = activeSession else {
+            lock.unlock()
+            return nil
+        }
+        activeSession = nil
+        let watch = deviceWatch
+        deviceWatch = nil
+        lock.unlock()
+
+        watch?.stop()
+        session.requestStop()
+        do {
+            let device = try session.detachDevice()
+            let stopped = session.status(state: .stopped)
+            lock.lock()
+            lastStatus = stopped
+            lock.unlock()
+            return device
+        } catch {
+            // 停 IO 失败时退化为完整停止并恢复格式，避免留下仍在运行的旧 IOProc。
+            _ = session.stopIOAndRestore()
+            let stopped = session.status(
+                state: .failed,
+                failureDescription: HiFiPlaybackError.from(error).localizationKey
+            )
+            lock.lock()
+            lastStatus = stopped
+            lock.unlock()
+            throw error
+        }
     }
 
     private func handleDeviceEvent(_ event: DeviceLifecycleWatch.Event) {
@@ -259,6 +359,13 @@ private final class ConfiguredDevice: @unchecked Sendable {
     private let originalPhysical: AudioStreamBasicDescription
     private let originalVirtual: AudioStreamBasicDescription
     private let restored = Atomic<Bool>(false)
+
+    /// 同一设备且目标物理格式与当前已应用格式一致时可沿用。
+    /// 不比较探测得到的整个 plan：设备已配置后重新探测可能选到不同候选（streamID 等），
+    /// 那样会把同格式切歌误判为需要重配，导致 DAC 重新锁定采样率。
+    func canReuse(deviceUID candidateUID: String, targetPhysicalFormat target: AudioStreamBasicDescription) -> Bool {
+        candidateUID == deviceUID && CoreAudioHALFormatProbe.matches(physicalFormat, target)
+    }
 
     init(plan: DoPTransportPlan) throws {
         deviceUID = plan.deviceUID
@@ -448,6 +555,23 @@ private final class PlaybackSession: @unchecked Sendable {
     }
 
     func stopIOAndRestore() -> Error? {
+        let ioError = stopIO()
+        do {
+            try configuredDevice.restore()
+        } catch {
+            return ioError ?? error
+        }
+        return ioError
+    }
+
+    /// 保留设备格式与 hog，只停 IOProc；供原地跳转复用同一独占配置。
+    func detachDevice() throws -> ConfiguredDevice {
+        if let error = stopIO() { throw error }
+        return configuredDevice
+    }
+
+    @discardableResult
+    func stopIO() -> Error? {
         let exchanged = ioStopped.compareExchange(
             expected: false,
             desired: true,
@@ -463,11 +587,6 @@ private final class PlaybackSession: @unchecked Sendable {
                 firstError = CoreAudioHALFormatProbeError.ioProcDestroy(destroyStatus)
             }
             self.ioProcID = nil
-        }
-        do {
-            try configuredDevice.restore()
-        } catch {
-            firstError = firstError ?? error
         }
         return firstError
     }

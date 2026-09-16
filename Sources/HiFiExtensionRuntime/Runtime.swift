@@ -717,17 +717,30 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             record.sequenceIDs = ids
             let newSuccessors = record.successors.map(\.id) + record.apeSuccessors.map(\.id)
             if case .refresh = action, record.isActive, oldSuccessors != newSuccessors {
-                let status = try record.stopEngines()
-                synchronizeItem(for: record, status: status)
-                record.samplePosition = status.samplePosition
-                record.isActive = false
-                if let deviceUID = record.selectedDeviceID {
+                if record.isAPE {
+                    let status = try record.stopEngines()
+                    synchronizeItem(for: record, status: status)
+                    record.samplePosition = status.samplePosition
+                    record.isActive = false
+                    if let deviceUID = record.selectedDeviceID {
+                        do {
+                            try record.playCurrent(deviceUID: deviceUID, startingSample: record.samplePosition)
+                            record.isActive = true
+                        } catch {
+                            record.playbackState = "failed"
+                            record.failureDescription = failureKey(error)
+                        }
+                    }
+                } else {
+                    // DSD：队列变化只需按新 successors 重建读取源，沿用独占设备，避免刷新时 DAC 重锁。
+                    let position = record.engineStatus().samplePosition
+                    record.samplePosition = position - position % 16
                     do {
-                        try record.playCurrent(deviceUID: deviceUID, startingSample: record.samplePosition)
-                        record.isActive = true
+                        try record.seekCurrent(toSample: record.samplePosition)
                     } catch {
                         record.playbackState = "failed"
                         record.failureDescription = failureKey(error)
+                        record.isActive = false
                     }
                 }
             }
@@ -797,11 +810,17 @@ private final class HiFiRuntimeController: @unchecked Sendable {
             record.underrunCount = 0
             if wasPlaying {
                 do {
-                    _ = try record.stopEngines()
-                    guard let deviceUID = record.selectedDeviceID else {
-                        throw RuntimeControllerError.noOutputDevice
+                    if record.isAPE {
+                        // APE 保持 stop + play，等待硬件回归确认后再统一为设备保活跳转。
+                        _ = try record.stopEngines()
+                        guard let deviceUID = record.selectedDeviceID else {
+                            throw RuntimeControllerError.noOutputDevice
+                        }
+                        try record.playCurrent(deviceUID: deviceUID, startingSample: targetSample)
+                    } else {
+                        // DSD 原地跳转保留独占格式与 hog，避免每次快进都让 DAC 重新锁定采样率。
+                        try record.seekCurrent(toSample: targetSample)
                     }
-                    try record.playCurrent(deviceUID: deviceUID, startingSample: targetSample)
                     record.playbackState = "playing"
                     record.failureDescription = nil
                     lock.lock()
@@ -1050,12 +1069,14 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         let wasPlaying = record.isActive
         if wasPlaying { record.isActive = false }
         lock.unlock()
-        if wasPlaying { record.stopEnginesQuietly() }
         // 宿主列表切歌时，自然播完已经清除会话的 isActive 标记；若上一曲已到结尾，仍应接着播。
         let reachedEnd = record.sampleCount > 0 && record.samplePosition + 16 >= record.sampleCount
         let completedNaturally = record.playbackState == "stopped"
             || (record.playbackState == "paused" && reachedEnd)
         let shouldPlay = allowsAutomaticPlayback && (wasPlaying || completedNaturally)
+        // 播放中的 DSD 切歌不拆独占设备，直接原地换源；同一采样率与设备时 DAC 不会重锁。
+        let keepsDevice = shouldPlay && wasPlaying && !record.isAPE
+        if wasPlaying && !keepsDevice { record.stopEnginesQuietly() }
         record.currentIndex = index
         record.queueRevision &+= 1
         record.samplePosition = 0
@@ -1068,7 +1089,12 @@ private final class HiFiRuntimeController: @unchecked Sendable {
                     audioDeviceServiceController.releasePCMForExclusive(deviceUID: deviceUID)
                 }
                 try stopTrackedPlayback(beforeStarting: record)
-                try record.playCurrent(deviceUID: deviceUID, startingSample: 0)
+                if keepsDevice {
+                    // 引擎按新曲目的 plan 判断能否沿用独占配置，必要时才恢复并重新应用格式。
+                    try record.seekCurrent(toSample: 0)
+                } else {
+                    try record.playCurrent(deviceUID: deviceUID, startingSample: 0)
+                }
                 record.playbackState = "playing"
                 lock.lock(); record.isActive = true; lock.unlock()
             } catch {
@@ -1092,11 +1118,14 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         guard reordered.map(\.id) != record.sources.map(\.id),
               let currentIndex = reordered.firstIndex(where: { $0.id == currentID }) else { return }
         let wasPlaying = record.isActive
-        if wasPlaying {
+        // DSD 重排也沿用独占设备，只按新顺序重建读取源。
+        if wasPlaying, record.isAPE {
             let status = try record.stopEngines()
             synchronizeItem(for: record, status: status)
             record.samplePosition = status.samplePosition
             record.isActive = false
+        } else if wasPlaying {
+            record.samplePosition = record.engineStatus().samplePosition
         }
         let audibleID = record.sources[record.currentIndex].id
         record.sources = reordered
@@ -1105,7 +1134,11 @@ private final class HiFiRuntimeController: @unchecked Sendable {
         record.queueRevision &+= 1
         if wasPlaying, let deviceUID = record.selectedDeviceID {
             do {
-                try record.playCurrent(deviceUID: deviceUID, startingSample: record.samplePosition)
+                if record.isAPE {
+                    try record.playCurrent(deviceUID: deviceUID, startingSample: record.samplePosition)
+                } else {
+                    try record.seekCurrent(toSample: record.samplePosition)
+                }
                 record.isActive = true
             } catch {
                 record.playbackState = "failed"
@@ -1337,6 +1370,21 @@ private final class RuntimeSession {
 
     func engineStatus() -> EngineStatus {
         isAPE ? EngineStatus(pcmPlayer.status()) : EngineStatus(player.status())
+    }
+
+    /// DSD 原地跳转：保留独占格式与 hog，只重建读取源，避免 DAC 因 seek 重新锁定采样率。
+    func seekCurrent(toSample sample: UInt64) throws {
+        guard let deviceUID = selectedDeviceID else {
+            throw RuntimeControllerError.noOutputDevice
+        }
+        _ = try player.seek(
+            fileAt: url,
+            deviceUID: deviceUID,
+            startingSample: sample,
+            sacdTrackNumber: sacdTrackNumber,
+            itemID: sources[currentIndex].id,
+            successors: successors
+        )
     }
 
     /// 停止双引擎；只传播当前格式引擎的错误（另一引擎 idle 时停止无副作用）。
