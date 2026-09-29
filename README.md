@@ -1,10 +1,10 @@
 # Hi-Fi for foofoil
 
-Advanced local audio playback extension for [foofoil](https://github.com/foofoil/foofoil). **Requires foofoil.**
+Advanced local audio playback module for [foofoil](https://github.com/foofoil/foofoil). **Requires foofoil.**
 
-Hi-Fi is a first-party foofoil extension. It is not a standalone player. Install foofoil first, then install Hi-Fi from inside the app (or load a development bundle while building from source).
+Hi-Fi is developed as an internal foofoil module, not a standalone player. It ships with foofoil. Extension/plugin bundles are only a development and integration mechanism; users do not install or update Hi-Fi separately.
 
-The extension adds high-resolution and DSD playback that the lightweight foofoil core does not ship: DSF/DFF, uncompressed stereo SACD ISO, APE with CUE sheets (Monkey's Audio decoded in-extension to exclusive PCM), SACD DST (in progress), enhanced handling of formats the system already plays, output-device selection, DoP, and music-oriented session features. Playback lists are projected through foofoil's shared navigator, not a private sidebar.
+The module implements high-resolution and DSD playback for foofoil: DSF/DFF, uncompressed stereo SACD ISO, APE with CUE sheets (Monkey's Audio decoded in-extension to exclusive PCM), SACD DST (in progress), enhanced handling of formats the system already plays, output-device selection, DoP, and music-oriented session features. Playback lists are projected through foofoil's shared navigator, not a private sidebar.
 
 [简体中文](README.zh-CN.md)
 
@@ -18,7 +18,7 @@ The current tree is the Phase 0 development prototype extracted from foofoil's `
 - APE (Monkey's Audio, BSD-3 decoder vendored as `Sources/MACLib`) is decoded in-extension and played as bit-perfect exclusive PCM through CoreAudio HAL with Hog Mode; single `.ape` opens whole-disc, and a sibling or opened `.cue` projects CUE track lists with seeking and track advance. Listening verification on a DAC is pending user confirmation
 - Host session commands for play, pause, progress, output-device selection, and device release on close
 
-Not yet a shipping release. DSD playback is DoP-only; DSD → PCM conversion is out of scope. DSD64/128/256 and history track/position restore are hardware/user-verified. Per-device PCM/DSD handoff is implemented and awaiting hardware regression; system-default playback is excluded from arbitration. Remembering the last selected DAC remains unfinished. Other tested device scenarios have no reported issues. Existing metadata needs no additional work. Later scope includes DST / SACD multichannel, process-isolation evaluation, and signed/notarized Releases for in-app install.
+Not yet a shipping release. DSD playback is DoP-only; DSD → PCM conversion is out of scope. DSD64/128/256 and history track/position restore are hardware/user-verified. Per-device PCM/DSD handoff is implemented and awaiting hardware regression; system-default playback is excluded from arbitration. Remembering the last selected DAC remains unfinished. Other tested device scenarios have no reported issues. Existing metadata needs no additional work. Later scope includes DST / SACD multichannel, process-isolation evaluation, and integration into signed/notarized foofoil releases.
 
 See [docs/hifi-phase0-dsf-playback-handoff.md](docs/hifi-phase0-dsf-playback-handoff.md) and [docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md](docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md).
 
@@ -32,14 +32,14 @@ Compatible Extension API: v1 (`extensionAPI.min` / `max` in `ExtensionManifest.j
 
 ## Local Playback Test
 
-Hi-Fi is not in the in-app Registry yet. For a real hardware check, keep `hifi` as a sibling of `foofoil` and start the host with its `./run` script, which builds this package and injects `Hi-Fi.foofoilextension` into the Debug app:
+For a real hardware check, keep `hifi` as a sibling of `foofoil` and start the host with its `./run` script, which builds this package and injects `Hi-Fi.foofoilextension` into the Debug app:
 
 ```sh
 cd ../foofoil
 ./run
 ```
 
-Then drop a Stereo DSD64 `.dsf` onto a foil, or File → Open. Use the in-window play/pause controls and the **Extensions** menu for output-device selection. Do not use Xcode ⌘R for this path: it builds foofoil without injecting the plugin.
+Then drop a Stereo DSD64 `.dsf` onto a foil, or File → Open. Use the host playback controls for play/pause and output-device selection. Do not use Xcode ⌘R for this path: it builds foofoil without injecting the plugin.
 
 To build the bundle by itself:
 
@@ -47,7 +47,7 @@ To build the bundle by itself:
 ./build-plugin /tmp/foofoil-hifi-plugin
 ```
 
-This produces `Hi-Fi.foofoilextension`. Production installs will go through foofoil's Extension Manager and will not be bundled inside `foofoil.app`.
+This produces `Hi-Fi.foofoilextension`. The app’s `./package-dmg` script embeds this module inside `foofoil.app` for unified distribution. Bundle names and ABI identifiers remain internal implementation details.
 
 ## Tests and Tools
 
@@ -63,7 +63,7 @@ swift run hifi-hal-probe
 
 | Repository | Role |
 | --- | --- |
-| [foofoil](https://github.com/foofoil/foofoil) | Host app. Install this first. |
+| [foofoil](https://github.com/foofoil/foofoil) | App that integrates and distributes the audio capability. |
 | [extension-kit](https://github.com/foofoil/extension-kit) | Extension API contracts, ABI header, and Manifest schema |
 
 ## License

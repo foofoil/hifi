@@ -1,10 +1,10 @@
 # Hi-Fi for foofoil
 
-面向 [foofoil](https://github.com/foofoil/foofoil) 的高保真本地音频扩展。**需要先安装 foofoil。**
+面向 [foofoil](https://github.com/foofoil/foofoil) 的高保真本地音频模块。**随 foofoil 使用。**
 
-Hi-Fi 是 foofoil 的第一方扩展，不能作为独立播放器运行。请先安装 foofoil，再在应用内安装 Hi-Fi（或在从源码构建时加载开发用扩展包）。
+Hi-Fi 是 foofoil 的内部开发模块，不能作为独立播放器运行，随浮箔统一交付。扩展/插件包仅用于开发与集成，用户无需单独安装或更新 Hi-Fi。
 
-它为轻量 Core 补充高解析度与 DSD 播放：DSF/DFF、未压缩立体声 SACD ISO、APE + CUE（Monkey's Audio 在扩展内解码为独占 PCM）、SACD DST（进行中）、增强系统已能播放的格式、输出设备选择、DoP，以及音乐场景下的会话能力。播放列表由 foofoil 的通用导航面板呈现，扩展不提供私有侧栏。
+它为浮箔实现高解析度与 DSD 播放：DSF/DFF、未压缩立体声 SACD ISO、APE + CUE（Monkey's Audio 在扩展内解码为独占 PCM）、SACD DST（进行中）、增强系统已能播放的格式、输出设备选择、DoP，以及音乐场景下的会话能力。播放列表由 foofoil 的通用导航面板呈现，扩展不提供私有侧栏。
 
 [English](README.md)
 
@@ -18,7 +18,7 @@ Hi-Fi 是 foofoil 的第一方扩展，不能作为独立播放器运行。请�
 - APE（Monkey's Audio，BSD-3 解码器内嵌于 `Sources/MACLib`）在扩展内解码，经 CoreAudio HAL 以 Hog 独占输出比特精确 PCM；单个 `.ape` 按整轨打开，同名/打开的 `.cue` 投影 CUE 分轨列表并支持 Seek 与切轨。DAC 实听待用户确认
 - 宿主侧具备播放、暂停、进度轮询、输出设备选择和关闭时释放设备的能力
 
-这还不是正式发布。DSD 仅通过 DoP 输出，不实现 DSD → PCM 转换。DSD64/128/256 及历史曲目、播放位置恢复已通过实测。多个箔按设备交接独占 PCM/DSD 的修复已实现，待实机回归；跟随系统输出不参与抢占。记住上次选择的 DAC 尚未完成。其他已测设备场景未发现问题。已有资源的 metadata 未发现问题，不列补充事项。DST / SACD 多声道、进程隔离评估及可供应用内安装的签名与公证 Release 属后续范围。
+这还不是正式发布。DSD 仅通过 DoP 输出，不实现 DSD → PCM 转换。DSD64/128/256 及历史曲目、播放位置恢复已通过实测。多个箔按设备交接独占 PCM/DSD 的修复已实现，待实机回归；跟随系统输出不参与抢占。记住上次选择的 DAC 尚未完成。其他已测设备场景未发现问题。已有资源的 metadata 未发现问题，不列补充事项。DST / SACD 多声道、进程隔离评估及随浮箔统一签名与公证的发布集成 属后续范围。
 
 详见 [docs/hifi-phase0-dsf-playback-handoff.md](docs/hifi-phase0-dsf-playback-handoff.md) 和 [docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md](docs/foofoil_DSF_DFF_SACD_ISO_Technical_Plan_v2.md)。
 
@@ -32,14 +32,14 @@ Hi-Fi 是 foofoil 的第一方扩展，不能作为独立播放器运行。请�
 
 ## 本地播放验收
 
-Hi-Fi 尚未进入应用内 Registry。要在真实设备上试播，请把 `hifi` 放在 `foofoil` 的兄弟目录，并用宿主仓库的 `./run` 启动：它会构建本包，并把 `Hi-Fi.foofoilextension` 注入 Debug 应用。
+要在真实设备上试播，请把 `hifi` 放在 `foofoil` 的兄弟目录，并用宿主仓库的 `./run` 启动：它会构建本包，并把 `Hi-Fi.foofoilextension` 注入 Debug 应用。
 
 ```sh
 cd ../foofoil
 ./run
 ```
 
-然后将 Stereo DSD64 的 `.dsf` 拖到箔片上，或用“文件 → 打开”。窗口内可播放/暂停，菜单栏“扩展”里可选择输出设备。不要用 Xcode 的 ⌘R 做这条路径，它不会注入插件。
+然后将 Stereo DSD64 的 `.dsf` 拖到箔片上，或用“文件 → 打开”。通过宿主播放控件播放/暂停并选择输出设备。不要用 Xcode 的 ⌘R 做这条路径，它不会注入插件。
 
 只打扩展包：
 
@@ -47,7 +47,7 @@ cd ../foofoil
 ./build-plugin /tmp/foofoil-hifi-plugin
 ```
 
-将生成 `Hi-Fi.foofoilextension`。正式安装仍走 foofoil 的 Extension Manager，不会打进 `foofoil.app`。
+将生成 `Hi-Fi.foofoilextension`。应用的 `./package-dmg` 脚本会将该模块嵌入 `foofoil.app`，统一分发。包名称和 ABI 标识仅是内部实现细节。
 
 ## 测试与工具
 
@@ -63,7 +63,7 @@ swift run hifi-hal-probe
 
 | 仓库 | 职责 |
 | --- | --- |
-| [foofoil](https://github.com/foofoil/foofoil) | 宿主应用，必须先安装 |
+| [foofoil](https://github.com/foofoil/foofoil) | 整合并统一交付音频能力的应用 |
 | [extension-kit](https://github.com/foofoil/extension-kit) | 扩展 API 契约、ABI 头文件和 Manifest Schema |
 
 ## 许可证
