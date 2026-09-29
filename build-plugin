@@ -6,6 +6,7 @@ SCRIPT_DIR="${0:A:h}"
 BUILD_ROOT="${TMPDIR:-/tmp}/foofoil-hifi-plugin-build"
 OUTPUT_ROOT="${1:-${TMPDIR:-/tmp}/foofoil-hifi-plugin}"
 SIGN_IDENTITY="${2:--}"
+CONFIGURATION="${3:-debug}"
 BUNDLE_PATH="$OUTPUT_ROOT/Hi-Fi.foofoilextension"
 
 SWIFTPM_MODULECACHE_OVERRIDE="$BUILD_ROOT/module-cache" \
@@ -14,14 +15,14 @@ swift build \
     --package-path "$SCRIPT_DIR" \
     --disable-sandbox \
     --scratch-path "$BUILD_ROOT" \
-    --configuration debug \
+    --configuration "$CONFIGURATION" \
     --product HiFiExtensionRuntime
 
 BIN_PATH=$(swift build \
     --package-path "$SCRIPT_DIR" \
     --disable-sandbox \
     --scratch-path "$BUILD_ROOT" \
-    --configuration debug \
+    --configuration "$CONFIGURATION" \
     --show-bin-path)
 
 mkdir -p "$BUNDLE_PATH/Contents/MacOS" "$BUNDLE_PATH/Contents/Resources"
