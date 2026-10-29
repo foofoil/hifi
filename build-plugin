@@ -3,20 +3,47 @@
 set -euo pipefail
 
 SCRIPT_DIR="${0:A:h}"
-BUILD_ROOT="${TMPDIR:-/tmp}/foofoil-hifi-plugin-build"
+# 构建状态放在仓库内而不是系统临时目录：临时目录会被系统按时间清理，
+# 清理后 SwiftBuild 仍会复用已失效的增量状态，导致 WriteAuxiliaryFile 报 “No such file or directory”。
+BUILD_ROOT="${FOOFOIL_PLUGIN_BUILD_ROOT:-$SCRIPT_DIR/.build/plugin}"
 OUTPUT_ROOT="${1:-${TMPDIR:-/tmp}/foofoil-hifi-plugin}"
 SIGN_IDENTITY="${2:--}"
 CONFIGURATION="${3:-debug}"
+PRODUCT="HiFiExtensionRuntime"
 BUNDLE_PATH="$OUTPUT_ROOT/Hi-Fi.foofoilextension"
 
-SWIFTPM_MODULECACHE_OVERRIDE="$BUILD_ROOT/module-cache" \
-CLANG_MODULE_CACHE_PATH="$BUILD_ROOT/clang-cache" \
-swift build \
-    --package-path "$SCRIPT_DIR" \
-    --disable-sandbox \
-    --scratch-path "$BUILD_ROOT" \
-    --configuration "$CONFIGURATION" \
-    --product HiFiExtensionRuntime
+BUILD_LOG=$(mktemp "${TMPDIR:-/tmp}/foofoil-hifi-build.XXXXXX")
+trap 'rm -f "$BUILD_LOG"' EXIT
+
+# SwiftBuild 增量状态损坏时的典型错误；只有这类基础设施错误才值得清理重建。
+STALE_STATE_PATTERN='unable to (write|read|open) file .*: No such file or directory|failed to deserialize .*No such file or directory'
+
+build_runtime() {
+    SWIFTPM_MODULECACHE_OVERRIDE="$BUILD_ROOT/module-cache" \
+    CLANG_MODULE_CACHE_PATH="$BUILD_ROOT/clang-cache" \
+    swift build \
+        --package-path "$SCRIPT_DIR" \
+        --disable-sandbox \
+        --scratch-path "$BUILD_ROOT" \
+        --configuration "$CONFIGURATION" \
+        --product "$PRODUCT" 2>&1 | tee "$BUILD_LOG"
+}
+
+if build_runtime; then
+    :
+else
+    BUILD_RESULT=$?
+    if ! grep -Eq "$STALE_STATE_PATTERN" "$BUILD_LOG"; then
+        exit "$BUILD_RESULT"
+    fi
+    if [[ -z "$BUILD_ROOT" || "$BUILD_ROOT" == "/" || "$BUILD_ROOT" == "$HOME" ]]; then
+        print -u2 "Refusing to remove unsafe build root: '$BUILD_ROOT'"
+        exit 1
+    fi
+    print -u2 "Detected damaged SwiftBuild state; removing $BUILD_ROOT and rebuilding once."
+    rm -rf "$BUILD_ROOT"
+    build_runtime
+fi
 
 BIN_PATH=$(swift build \
     --package-path "$SCRIPT_DIR" \
